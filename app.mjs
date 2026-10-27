@@ -1,0 +1,595 @@
+import { PARTS, ZONES, SEATS, INITIAL_PARTICIPANTS, createInitialState, createDemoPreferences, stateFingerprint } from './data.mjs';
+import { validatePreferences, findBlockingPairs } from './matching.mjs';
+
+const icons = {
+  chair: '<rect x="7" y="3" width="10" height="10" rx="3"/><path d="M4 11v6h16v-6M8 17v4m8-4v4m-4-8v4"/>',
+  grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+  list: '<path d="M9 6h12M9 12h12M9 18h12M3 6h1M3 12h1M3 18h1"/>',
+  chart: '<path d="M4 4v16h16M8 15v-4m5 4V7m5 8v-6"/>',
+  building: '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 7h1m4 0h1M9 11h1m4 0h1m-5 6v4m4-4v4"/>',
+  users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2m20 0v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/><circle cx="9" cy="7" r="4"/>',
+  sparkle: '<path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3ZM20 2v4m-2-2h4"/>',
+  arrow: '<path d="M5 12h14m-6-6 6 6-6 6"/>',
+  chevron: '<path d="m9 5 7 7-7 7"/>',
+  down: '<path d="m6 9 6 6 6-6"/>',
+  up: '<path d="m6 15 6-6 6 6"/>',
+  help: '<circle cx="12" cy="12" r="9"/><path d="M9 9a3 3 0 0 1 6 0c0 2-3 2-3 4m0 3h.01"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10h.01"/>',
+  download: '<path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/>',
+  upload: '<path d="M12 16V4m-5 5 5-5 5 5M4 16v4h16v-4"/>',
+  check: '<path d="m5 12 4 4L19 6"/>',
+  checkcircle: '<circle cx="12" cy="12" r="9"/><path d="m7 12 3 3 7-7"/>',
+  close: '<path d="m6 6 12 12M6 18 18 6"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  minus: '<path d="M5 12h14"/>',
+  search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
+  monitor: '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/>',
+  electric: '<path d="m13 2-9 12h7l-1 8 10-12h-7l1-8Z"/>',
+  partition: '<path d="M3 20V5h18v15M9 5v15m6-15v15"/>',
+  edit: '<path d="m15 4 5 5M4 20l5-1L21 7a2.12 2.12 0 0 0-3-3L6 16l-2 4Z"/>',
+  leaf: '<path d="M20 3C9 1 3 8 5 14c1 4 6 6 10 3 4-3 5-8 5-14ZM4 21 15 9"/>',
+  door: '<path d="M3 21h18M5 21V3h14v18m-5-10h.01"/>',
+  printer: '<path d="M6 9V3h12v6M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M6 14h12v7H6zm12-2h.01"/>',
+  grip: '<path d="M8 5h.01m7 0h.01M8 12h.01m7 0h.01M8 19h.01m7 0h.01"/>',
+  save: '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12l4 4v12a2 2 0 0 1-2 2Z"/><path d="M7 3v6h10V3M7 21v-8h10v8"/>',
+  target: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
+};
+const icon = (name, className = '') => `<svg class="${className}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || icons.chair}</svg>`;
+const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const seatById = new Map(SEATS.map(s => [s.id, s]));
+const storageKeys = { state: 'jari-workspace-v1', drafts: 'jari-drafts-v1', person: 'jari-current-person-v1' };
+const app = document.querySelector('#app');
+const dialog = document.querySelector('#dialog');
+let workspace = createInitialState();
+let backend = false;
+let demo = new URLSearchParams(location.search).has('demo');
+let view = 'seats';
+let currentId = readStorage(storageKeys.person, 'data-1');
+let drafts = readStorage(storageKeys.drafts, {});
+if (!drafts || typeof drafts !== 'object' || Array.isArray(drafts)) drafts = {};
+let selectedSeat = '68';
+let zoom = 100;
+let filter = 'all';
+let search = '';
+let busy = false;
+let toastTimer;
+let dialogReturnFocus;
+let draggedRank = null;
+let rosterDraft = [];
+let syncing = false;
+let actionPending = false;
+let workspaceRevision = 0;
+
+function readStorage(key, fallback) {
+  try { const value = localStorage.getItem(key); return value === null ? fallback : JSON.parse(value); } catch { return fallback; }
+}
+function writeStorage(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); return true; } catch { return false; }
+}
+function toast(message, error = false) {
+  const el = document.querySelector('#toast');
+  clearTimeout(toastTimer);
+  el.textContent = message;
+  el.className = `visible${error ? ' error' : ''}`;
+  toastTimer = setTimeout(() => el.classList.remove('visible'), error ? 6500 : 3700);
+}
+function currentPerson() { return workspace.participants.find(p => p.id === currentId) || workspace.participants[0]; }
+function getDraft(personId = currentPerson()?.id) {
+  const candidate = Object.hasOwn(drafts, personId) ? drafts[personId] : workspace.preferences[personId] || [];
+  return Array.isArray(candidate) ? [...new Set(candidate.filter(id => seatById.has(id)))] : [];
+}
+function setDraft(ranking) {
+  drafts[currentPerson().id] = [...ranking];
+  if (!demo && !writeStorage(storageKeys.drafts, drafts)) toast('이 브라우저에 임시 저장할 수 없습니다. 선호를 저장하거나 파일로 내려받아 주세요.', true);
+}
+function submittedCount() { return workspace.participants.filter(p => Array.isArray(workspace.preferences[p.id]) && workspace.preferences[p.id].length === SEATS.length).length; }
+function allSubmitted() { return submittedCount() === workspace.participants.length && workspace.participants.length > 0; }
+function partChip(part) { return `<span class="part-chip ${esc(part)}"><span class="part-dot ${esc(part)}"></span>${esc(PARTS[part].label)}</span>`; }
+function timestamp(value) { return value ? new Intl.DateTimeFormat('ko-KR', { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(value)) : ''; }
+function setWorkspace(value) {
+  workspace = value;
+  workspaceRevision++;
+  if (!workspace.participants.some(p => p.id === currentId)) currentId = workspace.participants[0]?.id;
+  if (!demo && !backend && !writeStorage(storageKeys.state, workspace)) toast('브라우저 저장 공간이 부족합니다. 백업 파일을 내려받아 주세요.', true);
+}
+async function api(path, options = {}) {
+  const response = await fetch(path, { ...options, headers: { 'Content-Type': 'application/json', ...options.headers }, signal: AbortSignal.timeout(12000) });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || '저장하지 못했습니다. 다시 시도해 주세요.');
+  return payload;
+}
+
+function render() {
+  const person = currentPerson();
+  const isResult = view === 'results';
+  const result = workspace.result;
+  const count = submittedCount();
+  app.innerHTML = `
+    <aside class="sidebar" aria-label="워크스페이스 메뉴">
+      <div class="brand"><span class="brand-mark">${icon('chair')}</span><span class="brand-name">자리</span><span class="brand-label">jari</span></div>
+      <div class="workspace-tile"><span class="avatar">P</span><div><strong>플랫폼개발팀</strong><small>13층 워크스페이스</small></div></div>
+      <p class="nav-caption">WORKSPACE</p>
+      <nav class="nav" aria-label="주 메뉴">
+        <button class="nav-button ${view === 'seats' ? 'active' : ''}" data-action="navigate" data-view="seats" aria-label="좌석 둘러보기" ${view === 'seats' ? 'aria-current="page"' : ''}>${icon('grid')}<span class="nav-text">좌석 둘러보기</span></button>
+        <button class="nav-button ${view === 'preferences' ? 'active' : ''}" data-action="navigate" data-view="preferences" aria-label="선호 입력" ${view === 'preferences' ? 'aria-current="page"' : ''}>${icon('list')}<span class="nav-text">선호 입력</span><span class="nav-count">${count}/${workspace.participants.length}</span></button>
+        <button class="nav-button ${isResult ? 'active' : ''}" data-action="navigate" data-view="results" aria-label="배정 결과" ${isResult ? 'aria-current="page"' : ''}>${icon('chart')}<span class="nav-text">배정 결과</span></button>
+      </nav>
+      <div class="nav-divider"></div>
+      <nav class="nav" aria-label="도움말 및 파일">
+        <button class="nav-button" data-action="guide">${icon('help')}<span class="nav-text">배정 가이드</span></button>
+        <button class="nav-button" data-action="export-workspace">${icon('download')}<span class="nav-text">워크스페이스 백업</span></button>
+      </nav>
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-note"><span class="note-icon">${icon('leaf')}</span><strong>좋은 동료 곁에,<br>나에게 맞는 자리.</strong><p>선호를 담아 공정하게.<br>우리의 다음 자리를 함께 정해요.</p><button data-action="enter-demo">미리 체험하기 ${icon('arrow')}</button></div>
+      <div class="sidebar-footer"><span class="avatar">J</span><span>함께 만드는 워크스페이스</span></div>
+    </aside>
+    <div class="main-shell">
+      <header class="topbar"><div class="breadcrumb">${icon('building')}<span>플랫폼개발팀</span><span>/</span><strong>13층 자리 추첨</strong></div><div class="topbar-actions"><span class="connection"><span class="status-dot"></span>${demo ? '예시 워크스페이스' : backend ? '로컬 서버 연결됨' : '브라우저 저장 모드'}</span><span class="avatar">P</span></div></header>
+      <main id="main" class="content">
+        <div class="intro"><div><p class="eyebrow">A BETTER PLACE TO WORK, TOGETHER</p><h1>${isResult && result ? '우리의 새로운 자리' : view === 'preferences' ? '내가 원하는 자리부터' : '좋은 자리, 함께 정해요'}</h1><p class="intro-description">${isResult && result ? '선호를 존중하고, 같은 파트는 더 가까이. 새로운 자리를 확인해 보세요.' : '개인의 선호는 존중하고, 같은 파트는 더 가까이.'}</p></div><div class="intro-actions"><button class="btn" data-action="manage">${icon('users')} 참여자 관리</button><button class="btn btn-primary" data-action="${isResult && result ? 'download-csv' : 'draw-settings'}" ${!allSubmitted() && !(isResult && result) ? `disabled title="모든 참여자가 21개 선호를 저장하면 배정할 수 있습니다"` : ''}>${icon(isResult && result ? 'download' : 'sparkle')}${isResult && result ? '결과 내려받기' : '배정 시작하기'}</button></div></div>
+        ${demo ? '<div class="demo-banner"><div><strong>미리보기 모드</strong> · 예시 선호로 체험 중이며 실제 제출 내역은 바뀌지 않습니다.</div><button data-action="exit-demo">실제 입력으로 돌아가기</button></div>' : ''}
+        <div class="steps" aria-label="자리 배정 진행 단계">
+          <button class="step ${view === 'seats' ? 'active' : ''} ${count > 0 ? 'complete' : ''}" data-action="navigate" data-view="seats"><span class="step-number">${count > 0 ? icon('check') : '01'}</span><span><strong>좌석 둘러보기</strong><small>나에게 맞는 자리를 찾아요</small></span></button>${icon('chevron', 'step-arrow')}
+          <button class="step ${view === 'preferences' ? 'active' : ''} ${allSubmitted() ? 'complete' : ''}" data-action="navigate" data-view="preferences"><span class="step-number">${allSubmitted() ? icon('check') : '02'}</span><span><strong>선호 입력하기</strong><small>${count} / ${workspace.participants.length}명 입력 완료</small></span></button>${icon('chevron', 'step-arrow')}
+          <button class="step ${isResult ? 'active' : ''} ${result ? 'complete' : ''}" data-action="navigate" data-view="results"><span class="step-number">${result ? icon('check') : '03'}</span><span><strong>배정 결과 확인</strong><small>함께 앉을 자리를 정해요</small></span></button>
+        </div>
+        ${isResult && !result ? emptyResults() : `${isResult ? resultStats() : ''}<div class="workspace-grid">${mapCard(isResult)}${isResult ? resultPanel(person) : preferencePanel(person)}</div>${furnitureCards()}`}
+        ${participantsCard(isResult && !!result)}
+        <footer class="page-footer"><span><span class="footer-brand">자리</span> &nbsp; 좋은 자리에서, 더 좋은 팀으로.</span><button data-action="guide">선호와 가까움을 함께 고려해요 ${icon('arrow')}</button></footer>
+      </main>
+    </div><input class="sr-only" type="file" id="import-file" accept=".json,application/json" aria-label="선호 JSON 파일 불러오기"/>`;
+  const scene = app.querySelector('.floor-scene');
+  if (scene) scene.style.transform = `scale(${zoom / 100})`;
+}
+
+function mapCard(showResults) {
+  const ranking = getDraft();
+  const assignments = new Map((showResults ? workspace.result.assignments : []).map(a => [a.seatId, a]));
+  const people = new Map(workspace.participants.map(p => [p.id, p]));
+  return `<section class="card floor-card" aria-labelledby="floor-title"><div class="card-header"><div class="card-heading"><h2 id="floor-title">${showResults ? '새로운 좌석 배치' : '13층 좌석 안내'}</h2><span class="count-pill">21석</span></div><span class="tiny-label">${icon('chair')} ${showResults ? `${workspace.result.metrics.vacancies}석 비어 있어요` : '플랫폼개발팀 전용'}</span></div>
+    <div class="floor-legend">${showResults ? Object.entries(PARTS).map(([id, p]) => `<span class="legend-item"><span class="part-dot ${id}"></span>${p.label} 파트</span>`).join('') + '<span class="legend-item"><span class="part-dot"></span>빈자리</span>' : Object.entries(ZONES).map(([id, z]) => `<span class="legend-item"><span class="zone-tag zone-${id.toLowerCase()}">${id}</span>${z.electric ? '전동' : '고정'} · ${z.partition ? '파티션' : '오픈형'}</span>`).join('')}</div>
+    <div class="floor-scroll"><div class="floor-stage" style="height:${469 * zoom / 100}px;min-width:${460 * zoom / 100}px"><div class="floor-scene"><div class="floor-wall"></div><div class="window-line"></div><span class="window-caption">WINDOW SIDE</span><div class="team-sign"><strong>플랫폼개발팀</strong>21석</div>
+      ${Object.entries(ZONES).map(([zone, info]) => `<section class="zone-group" data-zone="${zone}" aria-label="${zone}구역 ${info.name}"><div class="zone-heading"><span class="zone-tag zone-${zone.toLowerCase()}">${zone}</span><span>${info.electric ? '전동 데스크' : '고정 데스크'} · ${info.count}석</span></div><div class="seat-grid">${SEATS.filter(s => s.zone === zone).map(s => {
+        const index = ranking.indexOf(s.id);
+        const entry = assignments.get(s.id);
+        const occupant = entry ? people.get(entry.participantId) : null;
+        const label = `${zone}구역 ${s.id}번 좌석, ${info.electric ? '전동' : '고정'} 책상, ${info.partition ? '파티션 있음' : '파티션 없음'}${showResults ? occupant ? `, ${occupant.name}, ${PARTS[occupant.part].label}, ${entry.rank}지망` : ', 빈자리' : index >= 0 ? `, ${index + 1}지망, 누르면 좌석 정보` : `, 누르면 ${ranking.length + 1}지망으로 추가`}`;
+        return `<button class="seat ${!showResults && index >= 0 ? 'ranked' : ''} ${s.id === selectedSeat && !showResults ? 'selected' : ''} ${occupant ? `part-${occupant.part}` : ''}" data-action="seat" data-seat="${s.id}" aria-label="${esc(label)}" title="${esc(label)}" ${!showResults ? `aria-pressed="${index >= 0}"` : ''}><span class="seat-body">${icon('monitor')}<span>${s.id}</span></span>${showResults ? `<span class="seat-occupant">${occupant ? esc(occupant.name) : '빈자리'}</span>` : index >= 0 ? `<span class="seat-rank">${index + 1}</span>` : ''}</button>`;
+      }).join('')}</div></section>`).join('')}
+      <div class="aisle aisle-one"></div><div class="aisle aisle-two"></div><div class="corridor"><span>통로</span></div><div class="room room-meeting">${icon('users')}<span>MEETING ROOM</span></div><div class="room room-oa">${icon('printer')}<span>OA ZONE</span></div><div class="room room-idea">${icon('monitor')}<span>IDEA ROOM</span></div><div class="entrance">${icon('door')} 출입구</div>
+    </div></div></div><div class="map-footer"><span class="map-note">${icon('info')} ${showResults ? '파트 색상으로 함께 앉는 자리를 확인해요' : '좌석을 누르면 지망 순서대로 선택됩니다'}</span><div class="zoom-controls"><button class="icon-button" data-action="zoom-out" aria-label="좌석 지도 축소" ${zoom <= 80 ? 'disabled' : ''}>${icon('minus')}</button><span>${zoom}%</span><button class="icon-button" data-action="zoom-in" aria-label="좌석 지도 확대" ${zoom >= 140 ? 'disabled' : ''}>${icon('plus')}</button></div></div></section>`;
+}
+
+function personSelect(person, label = '참여자를 선택해 주세요') {
+  return `<div class="person-field"><label class="field-label" for="person-select">${label}</label><div class="person-select"><select id="person-select" aria-label="선호를 입력할 참여자">${Object.entries(PARTS).map(([part, p]) => `<optgroup label="${p.fullLabel}">${workspace.participants.filter(member => member.part === part).map(member => `<option value="${esc(member.id)}" ${member.id === person.id ? 'selected' : ''}>${esc(member.name)} · ${p.label}</option>`).join('')}</optgroup>`).join('')}</select><span class="part-dot ${person.part}"></span>${icon('down')}</div></div>`;
+}
+function preferencePanel(person) {
+  const ranking = getDraft(person.id);
+  const count = ranking.length;
+  const saved = !!workspace.preferences[person.id] && equal(workspace.preferences[person.id], ranking);
+  return `<section class="card preference-card" id="preferences" aria-labelledby="preference-title"><div class="preference-heading"><h2 id="preference-title">내 자리 선호</h2>${icon('list')}</div><p class="preference-subtitle">마음에 드는 자리부터 선택해 주세요.<br>같은 파트와의 거리도 함께 고려할게요.</p>${personSelect(person)}
+    <div class="progress-heading"><span>${saved ? '선호 입력 완료' : '나의 선택'}</span><strong>${count}<span> / 21개</span></strong></div><div class="progress-track" role="progressbar" aria-label="선호 입력 진행률" aria-valuenow="${count}" aria-valuemin="0" aria-valuemax="21"><div class="progress-fill" style="width:${count / 21 * 100}%"></div></div>
+    <div class="rank-help">${icon('info')}${count ? '드래그 또는 화살표로 순서를 바꿀 수 있어요' : '지도에서 1지망 좌석을 골라 주세요'}</div>
+    <ol class="rank-list" aria-label="21개 좌석 지망 순서">${ranking.map((id, i) => {
+      const seat = seatById.get(id), z = ZONES[seat.zone];
+      return `<li class="rank-row" draggable="true" data-rank-index="${i}">${icon('grip', 'drag-handle')}<span class="rank-num">${i + 1}</span><button class="rank-info" data-action="preview-seat" data-seat="${id}" aria-label="${i + 1}지망 ${seat.zone}구역 ${id}번 좌석 정보"><strong>${seat.zone}구역 · ${id}번</strong><small>${z.electric ? '전동' : '고정'} 데스크 · ${z.partition ? '파티션' : '오픈형'}</small></button><span class="rank-actions"><button class="icon-button" data-action="rank-up" data-index="${i}" aria-label="${id}번 좌석 순위 올리기" ${i === 0 ? 'disabled' : ''}>${icon('up')}</button><button class="icon-button" data-action="rank-down" data-index="${i}" aria-label="${id}번 좌석 순위 내리기" ${i === count - 1 ? 'disabled' : ''}>${icon('down')}</button><button class="icon-button" data-action="rank-remove" data-index="${i}" aria-label="${id}번 좌석 선호에서 제거">${icon('close')}</button></span></li>`;
+    }).join('')}${count < 21 ? Array.from({ length: Math.max(1, 4 - count) }, (_, i) => `<li class="rank-row empty-rank ${i === 0 ? 'next-rank' : ''}"><span class="rank-num">${count + i + 1}지망</span><span class="rank-info">${i === 0 ? '좌석을 선택해 주세요' : '다음 자리를 골라 주세요'}</span>${icon('plus')}</li>`).join('') : ''}</ol>
+    ${count < 21 ? `<button class="fill-button" data-action="autofill">${icon('sparkle')}남은 순위 자동 채우기</button>` : `<button class="fill-button" data-action="clear-draft">${icon('list')}선택 순서 다시 정하기</button>`}
+    <div class="preference-save"><button class="btn btn-primary btn-full" data-action="save-preferences" ${count !== 21 || saved || actionPending ? 'disabled' : ''}>${icon(saved ? 'check' : 'save')}${actionPending ? '저장 중…' : saved ? '선호 저장 완료' : '선호 저장하기'}</button><p class="save-note ${saved ? 'saved-note' : ''}">${saved ? '21개의 선호가 제출됐어요. 수정 후 다시 저장할 수 있습니다.' : `모든 좌석을 선택하면 저장할 수 있어요 · ${21 - count}개 남음`}</p>${count === 21 ? `<button class="export-person" data-action="export-person">${icon('download')}내 선호 파일 내려받기</button>` : ''}</div>
+  </section>`;
+}
+
+function furnitureCards() {
+  return `<div class="furniture-heading"><h2>자리마다 다른 매력</h2><button data-action="reference">원본 도면 보기 ${icon('arrow')}</button></div><div class="zone-cards">${Object.entries(ZONES).map(([id, z]) => `<button class="card zone-card" data-action="zone-info" data-zone="${id}" aria-label="${id}구역 ${z.name} 상세 보기"><img src="${z.photo}" alt="${id}구역 실제 책상과 의자" loading="lazy"/><div class="zone-card-content"><div class="zone-card-title"><span class="zone-tag zone-${id.toLowerCase()}">${id}</span>${id} 구역 <small>· ${z.count}석</small></div><h3>${z.name}</h3><p>${z.description}</p><div class="zone-features"><span class="feature">${icon(z.electric ? 'electric' : 'chair')}${z.electric ? '높이 조절' : '높이 고정'}</span><span class="feature">${icon('monitor')}싱글</span><span class="feature">${icon('partition')}${z.partition ? '파티션' : '오픈형'}</span></div></div></button>`).join('')}</div>`;
+}
+function filteredPeople() { return workspace.participants.filter(p => (filter === 'all' || p.part === filter) && p.name.includes(search.trim())); }
+function participantRows(showResults) {
+  const result = new Map((workspace.result?.assignments || []).map(a => [a.participantId, a]));
+  return filteredPeople().map(person => {
+    const saved = workspace.preferences[person.id];
+    const assignment = result.get(person.id);
+    return `<tr><td><div class="person-name"><span class="mini-avatar ${person.part}">${esc(person.name.slice(0, 1))}</span>${esc(person.name)}</div></td><td>${partChip(person.part)}</td><td>${showResults ? `<span class="submitted-status">${icon('checkcircle')}${assignment.rank}지망 배정</span>` : saved ? `<span class="submitted-status">${icon('checkcircle')}입력 완료</span>` : '<span class="status-pending"><span class="pending-dot"></span>입력 대기</span>'}</td><td>${showResults && assignment ? `${seatById.get(assignment.seatId).zone}구역 · ${assignment.seatId}번` : saved ? `${seatById.get(saved[0]).zone}구역 · ${saved[0]}번` : '—'}</td><td><button class="row-edit" data-action="choose-person" data-person="${esc(person.id)}">${showResults ? '결과 보기' : '선호 입력'} ${icon('chevron')}</button></td></tr>`;
+  }).join('') || '<tr><td colspan="5" class="table-empty">검색 결과가 없습니다.</td></tr>';
+}
+function participantsCard(showResults) {
+  return `<section class="card participants-card" aria-labelledby="participants-title"><div class="card-header participants-header"><div><div class="card-heading"><h2 id="participants-title">${showResults ? '모두의 배정 결과' : '함께하는 사람들'}</h2><span class="count-pill">${workspace.participants.length}명</span></div><p class="card-kicker">${showResults ? '파트별 배정과 개인별 지망 순위를 확인해요.' : `모든 참여자가 선호를 입력하면 배정을 시작할 수 있어요. 빈자리 ${SEATS.length - workspace.participants.length}석`}</p></div><div class="participants-tools"><button class="btn" data-action="import">${icon('upload')}파일 불러오기</button><button class="btn" data-action="${showResults ? 'download-csv' : 'export-workspace'}">${icon('download')}${showResults ? 'CSV 내보내기' : '내보내기'}</button></div></div><div class="participants-toolbar"><div class="filters">${[['all', '전체'], ...Object.entries(PARTS).map(([id, p]) => [id, p.label])].map(([id, label]) => `<button class="filter ${filter === id ? 'active' : ''}" data-action="filter" data-part="${id}">${id !== 'all' ? `<span class="part-dot ${id}"></span>` : ''}${label}<span>${id === 'all' ? workspace.participants.length : workspace.participants.filter(p => p.part === id).length}</span></button>`).join('')}</div><label class="search-field">${icon('search')}<input id="person-search" type="search" value="${esc(search)}" placeholder="이름 검색" aria-label="참여자 이름 검색"/></label></div><div class="table-scroll"><table><thead><tr><th scope="col">참여자</th><th scope="col">소속 파트</th><th scope="col">${showResults ? '배정 지망' : '입력 상태'}</th><th scope="col">${showResults ? '배정 좌석' : '1지망 좌석'}</th><th scope="col">${showResults ? '결과' : '선호 관리'}</th></tr></thead><tbody id="participant-rows">${participantRows(showResults)}</tbody></table></div><div class="table-footer"><span>이미지 기준 명단 · 초록색 인원 제외</span><span>${showResults ? `<strong>${workspace.result.metrics.matchedCount}명 배정 완료</strong>` : `<strong>${submittedCount()}명</strong> / ${workspace.participants.length}명 입력 완료`}</span></div></section>`;
+}
+function resultStats() {
+  const m = workspace.result.metrics;
+  return `<div class="result-stats"><div class="card stat-card"><div><span class="stat-label">평균 배정 지망</span><strong class="stat-value">${m.averageRank.toFixed(1)}<small>지망</small></strong><p>개인별 실제 선호 순위 기준</p></div>${icon('target')}</div><div class="card stat-card"><div><span class="stat-label">3지망 이내 배정</span><strong class="stat-value">${m.top3Count}<small>/ ${m.matchedCount}명</small></strong><p>좋아하는 자리에 조금 더 가까이</p></div>${icon('checkcircle')}</div><div class="card stat-card"><div><span class="stat-label">같은 파트 평균 거리</span><strong class="stat-value">${m.averageDistance.toFixed(2)}<small>상대 단위</small></strong><p>도면 좌표 기준 · 실제 미터 아님</p></div>${icon('users')}</div></div>`;
+}
+function resultPanel(person) {
+  const result = workspace.result;
+  const assignment = result.assignments.find(a => a.participantId === person.id);
+  const seat = seatById.get(assignment.seatId);
+  const zone = ZONES[seat.zone];
+  return `<section class="card result-panel" aria-labelledby="my-result-title"><h2 id="my-result-title">나의 새로운 자리</h2><p class="result-panel-sub">새로운 자리에서 만나요.</p>${personSelect(person, '배정 결과를 확인할 참여자')}<div class="result-person"><span class="mini-avatar ${person.part}">${esc(person.name.slice(0, 1))}</span><div><strong>${esc(person.name)} 님</strong>${partChip(person.part)}</div></div><div class="result-seat-large"><strong>${assignment.seatId}</strong><p>${seat.zone}구역 · 13층</p><span class="part-chip">${icon('check')} 나의 ${assignment.rank}지망</span></div><div class="result-detail"><div><span>책상 유형</span><strong>${zone.electric ? '전동 데스크' : '고정 데스크'}</strong></div><div><span>모니터</span><strong>싱글</strong></div><div><span>좌/우 파티션</span><strong>${zone.partition ? '있음' : '없음'}</strong></div></div><button class="btn btn-soft btn-full" data-action="zone-info" data-zone="${seat.zone}">${icon('chair')}내 자리 자세히 보기</button><div class="result-method">추첨 시드 <strong>${esc(result.seed)}</strong><br>${result.mode === 'distance' ? `안정 매칭 후보 ${result.metrics.candidateCount.toLocaleString()}개를 비교했어요.` : '개인 지망을 제안 순서로 사용하는 안정 매칭이에요.'}<br><button data-action="guide">배정 기준 살펴보기 ${icon('arrow')}</button></div></section>`;
+}
+function emptyResults() {
+  return `<section class="card empty-results">${icon('chair')}<h2>아직 새로운 자리를 정하지 않았어요</h2><p>${submittedCount()} / ${workspace.participants.length}명이 21개 선호를 입력했습니다.<br>모든 참여자가 입력하면 배정을 시작할 수 있어요.</p><button class="btn btn-primary" data-action="${allSubmitted() ? 'draw-settings' : 'navigate'}" ${allSubmitted() ? '' : 'data-view="preferences"'}>${allSubmitted() ? '배정 시작하기' : '내 선호 입력하기'}${icon('arrow')}</button><button class="btn btn-quiet" data-action="enter-demo">예시로 미리 체험하기</button></section>`;
+}
+
+function openDialog({ title, subtitle = '', body, footer = '', wide = false }) {
+  if (!dialog.open) dialogReturnFocus = document.activeElement;
+  dialog.className = wide ? 'wide-dialog' : '';
+  dialog.innerHTML = `<div class="dialog-header"><div><h2 id="dialog-title">${title}</h2>${subtitle ? `<p>${subtitle}</p>` : ''}</div><button class="icon-button" data-action="close-dialog" aria-label="대화상자 닫기">${icon('close')}</button></div><div class="dialog-body">${body}</div>${footer ? `<div class="dialog-footer">${footer}</div>` : ''}`;
+  if (!dialog.open) dialog.showModal();
+}
+function closeDialog() { if (!busy) dialog.close(); }
+function guideDialog() {
+  openDialog({ title: '좋은 자리를 정하는 방법', subtitle: '선호와 팀의 가까움을 함께 고려합니다.', body: `
+    <div class="guide-item"><span>01</span><div><h3>21개 좌석을 원하는 순서대로</h3><p>이름을 선택한 뒤 지도에서 좌석을 눌러 1지망부터 21지망까지 정해요. A는 전동·파티션, B는 전동·오픈형, C는 고정·파티션 좌석입니다. 화살표로 순서를 바꾸고, 모두 선택하면 선호를 저장할 수 있어요.</p></div></div>
+    <div class="guide-item"><span>02</span><div><h3>같은 파트는 더 가까이</h3><p>노랑은 배차, 파랑은 데이터, 빨강은 맵입니다. 파트마다 기준 좌석을 바꾸면서 좌석 측 우선순위를 만들고, 각 참여자는 자신의 지망 순서대로 좌석에 제안합니다. 같은 조건에서는 추첨 시드가 우선순위를 정해요.</p></div></div>
+    <div class="guide-item"><span>03</span><div><h3>안정 매칭 후보를 비교해요</h3><p>게일–섀플리 알고리즘으로 각 후보를 배정한 뒤, 같은 파트의 모든 두 사람 사이 거리 합이 가장 작은 후보를 선택해요. 거리가 같으면 평균 배정 지망이 더 좋은 후보를 택합니다. 21석에서는 기준 좌석 조합 7,980개와 기본 후보 1개를 비교해요.</p></div></div>
+    <div class="guide-item"><span>04</span><div><h3>같은 입력, 같은 시드, 같은 결과</h3><p>선호와 참여자, 추첨 시드가 같으면 결과도 같습니다. 결과에서 개인별 배정 지망과 파트별 거리를 확인하고 CSV 또는 재현용 JSON으로 내려받을 수 있어요. 실제 배정은 저장된 선호를 기준으로 합니다.</p></div></div>
+    <div class="dialog-note">거리 단위는 이미지의 상대 좌표입니다. 실제 미터 단위가 필요하면 실측 좌표를 반영해야 합니다. 게일–섀플리만으로 전체 거리의 전역 최솟값을 보장할 수는 없으며, 비교한 후보 중 최소 거리를 선택합니다. 각 결과는 선택된 좌석 측 우선순위에 대해 안정적입니다.</div>
+    <div class="dialog-note">${backend ? '이 로컬 서버에 연결한 브라우저의 제출 내용은 함께 저장됩니다. 서버를 다시 실행해도 제출 내용이 남아요.' : '현재는 브라우저 저장 모드입니다. 다른 기기의 선호는 개인별 JSON 파일로 내보낸 뒤, 파일 불러오기로 취합해 주세요.'} 예시 체험은 실제 제출 내용을 바꾸지 않습니다.</div>`, footer: '<button class="btn btn-primary" data-action="close-dialog">확인했어요</button>' });
+}
+function zoneDialog(zoneId, seatId) {
+  const z = ZONES[zoneId];
+  const ranking = getDraft();
+  const entry = view === 'results' && workspace.result ? workspace.result.assignments.find(a => a.seatId === seatId) : null;
+  const occupant = entry ? workspace.participants.find(p => p.id === entry.participantId) : null;
+  openDialog({ title: `${zoneId}구역${seatId ? ` · ${seatId}번 좌석` : ''}`, subtitle: z.name, body: `<img class="zone-dialog-photo" src="${zoneId === 'C' ? 'assets/zone-c-overview.jpg' : z.photo}" alt="${zoneId}구역의 실제 좌석 사진"/><p>${z.description}${occupant ? ` ${esc(occupant.name)} 님이 ${entry.rank}지망으로 배정됐습니다.` : ''}</p><div class="zone-dialog-features"><span class="feature">${icon('electric')}${z.electric ? '전동 높이 조절' : '고정 높이'}</span><span class="feature">${icon('monitor')}싱글 모니터</span><span class="feature">${icon('partition')}좌/우 파티션 ${z.partition ? '있음' : '없음'}</span></div><div class="zone-seat-list">${SEATS.filter(s => s.zone === zoneId).map(s => `<button class="btn ${ranking.includes(s.id) && view !== 'results' ? 'btn-soft' : ''}" data-action="dialog-seat" data-seat="${s.id}">${s.id}번${view !== 'results' && ranking.includes(s.id) ? ` · ${ranking.indexOf(s.id) + 1}지망` : ''}</button>`).join('')}</div>`, footer: `${view !== 'results' ? `<button class="btn btn-soft" data-action="add-zone" data-zone="${zoneId}">남은 ${zoneId}구역 좌석을 선호에 추가</button>` : ''}<button class="btn btn-primary" data-action="close-dialog">확인</button>` });
+}
+function drawSettings() {
+  if (!allSubmitted()) { toast(`아직 ${workspace.participants.length - submittedCount()}명의 선호가 필요합니다.`); return; }
+  openDialog({ title: '우리의 자리를 정해볼까요?', subtitle: '저장된 선호로 배정합니다. 같은 시드로 결과를 재현할 수 있어요.', body: `<div class="draw-summary"><span>참여자 <strong>${workspace.participants.length}명</strong></span><span>선호 입력 <strong>${submittedCount()}명 완료</strong></span><span>빈자리 <strong>${21 - workspace.participants.length}석</strong></span></div><div class="setting-field"><label class="field-label" for="draw-seed">추첨 시드</label><input class="input" id="draw-seed" value="${esc(workspace.result?.seed || 'jari-2026-13F')}" maxlength="64"/><small>동률일 때의 우선순위를 정합니다. 시드를 기록해 두면 동일한 배정을 재현할 수 있어요.</small></div><div class="setting-field"><span class="field-label">배정 기준</span><div class="setting-options"><label class="setting-option"><input type="radio" name="draw-mode" value="distance" checked/><div><strong>파트가 가까워지는 배정</strong><p>개인 지망으로 안정 매칭을 만든 뒤, 같은 파트의 거리 합이 가장 작은 후보를 선택해요.</p></div></label><label class="setting-option"><input type="radio" name="draw-mode" value="preference"/><div><strong>개인 선호 기준 배정</strong><p>파트 거리 우선순위 없이, 시드로 좌석 측 우선순위를 정해 안정 매칭합니다.</p></div></label></div></div><p class="form-error" id="draw-error" role="alert"></p>`, footer: '<button class="btn" data-action="close-dialog">돌아가기</button><button class="btn btn-primary" data-action="run-draw">배정 시작하기</button>' });
+}
+async function runDraw() {
+  const seed = document.querySelector('#draw-seed').value.trim();
+  if (!seed) { document.querySelector('#draw-error').textContent = '추첨 시드를 입력해 주세요.'; return; }
+  const mode = document.querySelector('input[name="draw-mode"]:checked').value;
+  const snapshot = structuredClone(workspace);
+  const fingerprint = stateFingerprint(snapshot);
+  const validation = validatePreferences(snapshot.participants, SEATS, snapshot.preferences);
+  if (!validation.valid) { toast(validation.errors[0], true); return; }
+  busy = true;
+  openDialog({ title: '좋은 자리를 찾고 있어요', body: `<div class="draw-progress"><span class="spinner" aria-hidden="true"></span><h3>선호를 담고, 팀을 더 가까이</h3><p id="draw-progress-text" role="status" aria-live="polite">안정적인 배정 후보를 비교하고 있어요.</p><div class="progress-track"><div class="progress-fill" id="draw-progress-fill" style="width:0%"></div></div></div>` });
+  let worker;
+  try {
+    const result = await new Promise((resolve, reject) => {
+      worker = new Worker(new URL('./allocation-worker.mjs', import.meta.url), { type: 'module' });
+      worker.onmessage = ({ data }) => {
+        if (data.type === 'progress') {
+          const { completed, total } = data.progress;
+          document.querySelector('#draw-progress-text').textContent = `${completed.toLocaleString()} / ${total.toLocaleString()}개 후보 비교`;
+          document.querySelector('#draw-progress-fill').style.width = `${completed / total * 100}%`;
+        } else if (data.type === 'result') resolve(data.result);
+        else if (data.type === 'error') reject(new Error(data.error));
+      };
+      worker.onerror = () => reject(new Error('배정 엔진을 실행하지 못했습니다. 서버에서 페이지를 열었는지 확인해 주세요.'));
+      worker.postMessage({ participants: snapshot.participants, seats: SEATS, preferences: snapshot.preferences, seed, mode });
+    });
+    if (findBlockingPairs(snapshot.participants, SEATS, snapshot.preferences, result.seatPriorities, result.assignments).length) throw new Error('안정 매칭 검증에 실패했습니다. 다시 배정해 주세요.');
+    if (backend && !demo) setWorkspace(await api('/api/result', { method: 'PUT', body: JSON.stringify({ result, fingerprint }) }));
+    else {
+      if (stateFingerprint(workspace) !== fingerprint) throw new Error('입력 내역이 바뀌었습니다. 최신 선호로 다시 배정해 주세요.');
+      setWorkspace({ ...workspace, result, updatedAt: new Date().toISOString() });
+    }
+    view = 'results';
+    busy = false;
+    dialog.close();
+    render();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    toast(`${result.metrics.matchedCount}명의 새로운 자리가 정해졌어요.`);
+  } catch (error) {
+    busy = false;
+    dialog.close();
+    toast(error.message, true);
+    await syncWorkspace(true);
+  } finally { worker?.terminate(); busy = false; }
+}
+
+function manageDialog() {
+  rosterDraft = structuredClone(workspace.participants);
+  openDialog({ title: '함께하는 사람들', subtitle: '이름과 파트를 수정하고, 최대 21명까지 참여할 수 있어요.', body: `<div class="roster-edit-list" id="roster-list">${rosterRows()}</div><button class="roster-add" data-action="add-person">${icon('plus')}참여자 추가 <span id="roster-count">(${rosterDraft.length}/21)</span></button><p class="form-error" id="roster-error" role="alert"></p><div class="dialog-note">초록색 인원을 제외한 이미지 기준 명단입니다. 명단을 바꾸면 기존 배정 결과가 해제되며, 남아 있는 참여자의 제출된 선호는 유지됩니다.</div>`, footer: '<button class="btn" data-action="close-dialog">취소</button><button class="btn btn-primary" data-action="save-roster">변경사항 저장</button>' });
+}
+function rosterRows() {
+  return rosterDraft.map((p, i) => `<div class="roster-edit-row" data-roster-index="${i}"><input class="input" data-field="name" value="${esc(p.name)}" aria-label="참여자 ${i + 1} 이름" maxlength="50"/><select class="input" data-field="part" aria-label="참여자 ${i + 1} 소속 파트">${Object.entries(PARTS).map(([id, part]) => `<option value="${id}" ${p.part === id ? 'selected' : ''}>${part.label}</option>`).join('')}</select><button class="icon-button" data-action="remove-person" data-index="${i}" aria-label="${esc(p.name || '새 참여자')} 명단에서 제거">${icon('close')}</button></div>`).join('');
+}
+function validateRoster(participants) {
+  if (!Array.isArray(participants) || participants.length < 1 || participants.length > 21) throw new Error('참여자는 1명부터 21명까지 등록할 수 있습니다.');
+  const ids = new Set(), names = new Set();
+  for (const person of participants) {
+    if (!person || typeof person.id !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(person.id) || ['__proto__', 'constructor', 'prototype'].includes(person.id) || ids.has(person.id)) throw new Error('참여자 ID가 올바르지 않거나 중복됩니다.');
+    if (typeof person.name !== 'string' || !person.name.trim() || person.name.length > 50 || names.has(person.name.trim())) throw new Error('이름을 50자 이내로 입력하고, 중복된 이름을 확인해 주세요.');
+    if (!Object.hasOwn(PARTS, person.part)) throw new Error('소속 파트를 선택해 주세요.');
+    ids.add(person.id); names.add(person.name.trim());
+  }
+}
+function validateSubset(participants, preferences) {
+  if (!preferences || typeof preferences !== 'object' || Array.isArray(preferences)) throw new Error('선호 파일의 형식이 올바르지 않습니다.');
+  const ids = Object.keys(preferences);
+  if (!ids.length) return;
+  const selected = participants.filter(p => ids.includes(p.id));
+  const validation = validatePreferences(selected, SEATS, preferences);
+  if (!validation.valid) throw new Error(validation.errors[0]);
+}
+async function saveRoster() {
+  if (actionPending) return;
+  try {
+    const participants = rosterDraft.map(p => ({ id: p.id, name: p.name.trim(), part: p.part }));
+    validateRoster(participants);
+    actionPending = true;
+    if (backend && !demo) setWorkspace(await api('/api/participants', { method: 'PUT', body: JSON.stringify({ participants }) }));
+    else setWorkspace({ ...workspace, participants, preferences: Object.fromEntries(Object.entries(workspace.preferences).filter(([id]) => participants.some(p => p.id === id))), result: null, updatedAt: new Date().toISOString() });
+    for (const id of Object.keys(drafts)) if (!participants.some(p => p.id === id)) delete drafts[id];
+    if (!demo) writeStorage(storageKeys.drafts, drafts);
+    closeDialog();
+    render();
+    toast(`${participants.length}명의 명단을 저장했어요.`);
+  } catch (error) { document.querySelector('#roster-error').textContent = error.message; }
+  finally { actionPending = false; }
+}
+async function savePreferences() {
+  if (actionPending) return;
+  const person = currentPerson();
+  const ranking = getDraft(person.id);
+  const validation = validatePreferences([person], SEATS, { [person.id]: ranking });
+  if (!validation.valid) { toast(validation.errors[0], true); return; }
+  actionPending = true;
+  render();
+  try {
+    if (backend && !demo) setWorkspace(await api(`/api/preferences/${encodeURIComponent(person.id)}`, { method: 'PUT', body: JSON.stringify({ ranking }) }));
+    else setWorkspace({ ...workspace, preferences: { ...workspace.preferences, [person.id]: ranking }, result: null, updatedAt: new Date().toISOString() });
+    if (equal(getDraft(person.id), ranking)) delete drafts[person.id];
+    if (!demo) writeStorage(storageKeys.drafts, drafts);
+    toast(`${person.name} 님의 21개 선호를 저장했어요.`);
+  } catch (error) { toast(error.message, true); }
+  finally { actionPending = false; render(); }
+}
+function downloadFile(filename, content, type = 'application/json') {
+  const url = URL.createObjectURL(new Blob([content], { type }));
+  const link = document.createElement('a');
+  link.href = url; link.download = filename; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function exportWorkspace() {
+  downloadFile(`자리-워크스페이스${demo ? '-예시' : ''}-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify({ format: 'jari-workspace-v1', ...workspace, seats: SEATS, exportedAt: new Date().toISOString() }, null, 2));
+  toast('참여자와 제출된 선호, 배정 결과를 파일로 내려받았어요.');
+}
+function exportPerson() {
+  const person = currentPerson();
+  const ranking = getDraft(person.id);
+  if (ranking.length !== 21) { toast('21개 좌석을 모두 선택해 주세요.', true); return; }
+  downloadFile(`자리-선호-${person.name}${demo ? '-예시' : ''}.json`, JSON.stringify({ format: 'jari-preferences-v1', participant: person, preferences: { [person.id]: ranking }, exportedAt: new Date().toISOString() }, null, 2));
+  toast('개인 선호 파일을 내려받았어요. 파일 불러오기로 취합할 수 있습니다.');
+}
+function downloadCsv() {
+  if (!workspace.result) return;
+  const csvCell = value => {
+    let str = String(value);
+    if (/^[=+@\-\t\r]/.test(str)) str = `'${str}`;
+    return `"${str.replaceAll('"', '""')}"`;
+  };
+  const rows = [['이름', '파트', '구역', '좌석 번호', '배정 지망', '추첨 시드', '배정 기준']];
+  for (const person of workspace.participants) {
+    const assignment = workspace.result.assignments.find(a => a.participantId === person.id);
+    rows.push([person.name, PARTS[person.part].label, seatById.get(assignment.seatId).zone, assignment.seatId, assignment.rank, workspace.result.seed, workspace.result.mode === 'distance' ? '파트 거리 고려' : '개인 선호 기준']);
+  }
+  for (const seat of SEATS.filter(s => !workspace.result.assignments.some(a => a.seatId === s.id))) rows.push(['빈자리', '', seat.zone, seat.id, '', workspace.result.seed, '']);
+  downloadFile(`자리-배정결과${demo ? '-예시' : ''}.csv`, '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n'), 'text/csv;charset=utf-8');
+  toast('Excel에서 열 수 있는 배정 결과를 내려받았어요.');
+}
+let pendingImport = null;
+async function prepareImport(file) {
+  if (!file) return;
+  try {
+    if (file.size > 1024 * 1024) throw new Error('1MB 이하의 JSON 선호 파일을 선택해 주세요.');
+    const parsed = JSON.parse(await file.text());
+    const participants = parsed.participants || workspace.participants;
+    validateRoster(participants);
+    validateSubset(participants, parsed.preferences);
+    pendingImport = { ...(parsed.participants ? { participants: participants.map(p => ({ id: p.id, name: p.name.trim(), part: p.part })) } : {}), preferences: parsed.preferences };
+    const count = Object.keys(parsed.preferences).length;
+    openDialog({ title: '선호 파일 불러오기', subtitle: esc(file.name), body: `<p><strong>${count}명</strong>의 21개 선호를 확인했습니다.</p>${parsed.participants ? `<p>파일의 참여자 명단 <strong>${participants.length}명</strong>을 적용합니다.</p>` : '<p>현재 명단에 해당하는 참여자의 선호를 합칩니다.</p>'}<div class="dialog-note">같은 참여자의 기존 선호는 파일에 담긴 선호로 갱신됩니다. 기존 배정 결과는 해제되며 새로 배정할 수 있습니다. 전체 백업 파일을 불러오는 경우에도 결과는 최신 선호로 다시 계산합니다.</div><p class="form-error" id="import-error" role="alert"></p>`, footer: '<button class="btn" data-action="close-dialog">취소</button><button class="btn btn-primary" data-action="apply-import">파일 적용하기</button>' });
+  } catch (error) { toast(error instanceof SyntaxError ? 'JSON 파일을 읽을 수 없습니다. 자리에서 내보낸 선호 파일을 선택해 주세요.' : error.message, true); }
+}
+async function applyImport() {
+  if (actionPending || !pendingImport) return;
+  actionPending = true;
+  try {
+    if (backend && !demo) setWorkspace(await api('/api/import', { method: 'POST', body: JSON.stringify(pendingImport) }));
+    else {
+      const participants = pendingImport.participants || workspace.participants;
+      const existing = Object.fromEntries(Object.entries(workspace.preferences).filter(([id]) => participants.some(p => p.id === id)));
+      setWorkspace({ ...workspace, participants, preferences: { ...existing, ...pendingImport.preferences }, result: null, updatedAt: new Date().toISOString() });
+    }
+    for (const id of Object.keys(pendingImport.preferences)) delete drafts[id];
+    if (!demo) writeStorage(storageKeys.drafts, drafts);
+    closeDialog(); render(); toast('선호 파일을 적용했어요. 참여 현황에서 확인해 주세요.');
+    pendingImport = null;
+  } catch (error) { document.querySelector('#import-error').textContent = error.message; }
+  finally { actionPending = false; }
+}
+
+function choosePerson(id) {
+  if (!workspace.participants.some(p => p.id === id)) return;
+  currentId = id;
+  if (!demo) writeStorage(storageKeys.person, id);
+  render();
+}
+function addSeat(id) {
+  if (!seatById.has(id)) return;
+  selectedSeat = id;
+  if (view === 'results') {
+    const entry = workspace.result?.assignments.find(a => a.seatId === id);
+    if (entry) choosePerson(entry.participantId);
+    else zoneDialog(seatById.get(id).zone, id);
+    return;
+  }
+  const ranking = getDraft();
+  if (ranking.includes(id)) { zoneDialog(seatById.get(id).zone, id); return; }
+  ranking.push(id); setDraft(ranking); render();
+  const seat = app.querySelector(`[data-action="seat"][data-seat="${id}"]`);
+  seat?.focus({ preventScroll: true });
+  app.querySelector('.rank-list').scrollTop = app.querySelector('.rank-list').scrollHeight;
+  toast(`${id}번 좌석을 ${ranking.length}지망으로 선택했어요.`);
+}
+function reorderRank(from, to) {
+  const ranking = getDraft();
+  if (from < 0 || to < 0 || from >= ranking.length || to >= ranking.length || from === to) return;
+  const scroll = app.querySelector('.rank-list')?.scrollTop || 0;
+  const [id] = ranking.splice(from, 1); ranking.splice(to, 0, id);
+  setDraft(ranking); render();
+  app.querySelector('.rank-list').scrollTop = scroll;
+  app.querySelector(`[data-rank-index="${to}"] .rank-info`)?.focus({ preventScroll: true });
+  toast(`${id}번 좌석을 ${to + 1}지망으로 옮겼어요.`);
+}
+function navigate(nextView) {
+  view = nextView;
+  render();
+  if (view === 'preferences') {
+    if (window.innerWidth <= 900) app.querySelector('.preference-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    app.querySelector('#person-select')?.focus({ preventScroll: true });
+  } else window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+function enterDemo() { location.assign(`${location.pathname}?demo=1`); }
+function exitDemo() { location.assign(location.pathname); }
+
+async function handleAction(button) {
+  if (busy && button.dataset.action !== 'close-dialog') return;
+  const action = button.dataset.action;
+  switch (action) {
+    case 'navigate': navigate(button.dataset.view); break;
+    case 'guide': guideDialog(); break;
+    case 'manage': manageDialog(); break;
+    case 'seat': addSeat(button.dataset.seat); break;
+    case 'preview-seat': zoneDialog(seatById.get(button.dataset.seat).zone, button.dataset.seat); break;
+    case 'zone-info': zoneDialog(button.dataset.zone); break;
+    case 'dialog-seat': {
+      const id = button.dataset.seat;
+      closeDialog();
+      if (view === 'results' || !getDraft().includes(id)) addSeat(id);
+      else { selectedSeat = id; render(); toast(`${id}번은 이미 ${getDraft().indexOf(id) + 1}지망이에요.`); }
+      break;
+    }
+    case 'add-zone': {
+      const ranking = getDraft();
+      const seats = SEATS.filter(s => s.zone === button.dataset.zone && !ranking.includes(s.id));
+      setDraft([...ranking, ...seats.map(s => s.id)]); closeDialog(); render(); toast(`${seats.length}개 좌석을 남은 지망에 추가했어요.`); break;
+    }
+    case 'autofill': {
+      const ranking = getDraft();
+      const origin = seatById.get(ranking.at(-1));
+      const remaining = SEATS.filter(s => !ranking.includes(s.id));
+      if (origin) remaining.sort((a, b) => Math.hypot(a.x - origin.x, a.y - origin.y) - Math.hypot(b.x - origin.x, b.y - origin.y));
+      setDraft([...ranking, ...remaining.map(s => s.id)]); render(); toast('남은 좌석을 채웠어요. 원하는 순서로 수정한 뒤 저장해 주세요.'); break;
+    }
+    case 'clear-draft': setDraft([]); render(); toast('선택 순서를 비웠어요. 제출한 선호는 다시 저장할 때 갱신됩니다.'); break;
+    case 'rank-up': reorderRank(Number(button.dataset.index), Number(button.dataset.index) - 1); break;
+    case 'rank-down': reorderRank(Number(button.dataset.index), Number(button.dataset.index) + 1); break;
+    case 'rank-remove': {
+      const ranking = getDraft(); const [id] = ranking.splice(Number(button.dataset.index), 1);
+      setDraft(ranking); render(); toast(`${id}번 좌석을 선택에서 뺐어요.`); break;
+    }
+    case 'save-preferences': await savePreferences(); break;
+    case 'export-person': exportPerson(); break;
+    case 'export-workspace': exportWorkspace(); break;
+    case 'download-csv': downloadCsv(); break;
+    case 'draw-settings': drawSettings(); break;
+    case 'run-draw': await runDraw(); break;
+    case 'enter-demo': enterDemo(); break;
+    case 'exit-demo': exitDemo(); break;
+    case 'zoom-in': zoom = Math.min(140, zoom + 10); render(); break;
+    case 'zoom-out': zoom = Math.max(80, zoom - 10); render(); break;
+    case 'filter': filter = button.dataset.part; render(); break;
+    case 'choose-person': if (view !== 'results') view = 'preferences'; choosePerson(button.dataset.person); if (window.innerWidth <= 900) app.querySelector('.preference-card, .result-panel')?.scrollIntoView({ behavior: 'smooth' }); break;
+    case 'reference': openDialog({ title: '13층 원본 좌석 안내', subtitle: '제공해 주신 도면과 실제 좌석 사진입니다.', wide: true, body: '<img src="assets/floor-reference.jpg" alt="13층 플랫폼개발팀 A 9석, B 6석, C 6석의 원본 도면 및 사진"/>', footer: '<button class="btn btn-primary" data-action="close-dialog">확인</button>' }); break;
+    case 'close-dialog': closeDialog(); break;
+    case 'add-person': {
+      if (rosterDraft.length >= 21) { document.querySelector('#roster-error').textContent = '좌석 수에 맞춰 최대 21명까지 참여할 수 있습니다.'; return; }
+      rosterDraft.push({ id: `person-${crypto.randomUUID()}`, name: '', part: 'data' });
+      document.querySelector('#roster-list').innerHTML = rosterRows();
+      document.querySelector('#roster-count').textContent = `(${rosterDraft.length}/21)`;
+      document.querySelector('#roster-list').lastElementChild.querySelector('input').focus(); break;
+    }
+    case 'remove-person': rosterDraft.splice(Number(button.dataset.index), 1); document.querySelector('#roster-list').innerHTML = rosterRows(); document.querySelector('#roster-count').textContent = `(${rosterDraft.length}/21)`; break;
+    case 'save-roster': await saveRoster(); break;
+    case 'import': app.querySelector('#import-file').click(); break;
+    case 'apply-import': await applyImport(); break;
+  }
+}
+
+app.addEventListener('click', event => {
+  const button = event.target.closest('button[data-action]');
+  if (button && !button.disabled) handleAction(button).catch(error => toast(error.message, true));
+});
+dialog.addEventListener('click', event => {
+  const button = event.target.closest('button[data-action]');
+  if (button && !button.disabled) handleAction(button).catch(error => toast(error.message, true));
+});
+dialog.addEventListener('cancel', event => { if (busy || actionPending) event.preventDefault(); });
+dialog.addEventListener('close', () => { if (dialogReturnFocus?.isConnected) dialogReturnFocus.focus({ preventScroll: true }); });
+app.addEventListener('change', event => {
+  if (event.target.id === 'person-select') choosePerson(event.target.value);
+  if (event.target.id === 'import-file') prepareImport(event.target.files[0]);
+});
+app.addEventListener('input', event => {
+  if (event.target.id === 'person-search') { search = event.target.value; document.querySelector('#participant-rows').innerHTML = participantRows(view === 'results' && !!workspace.result); }
+});
+dialog.addEventListener('input', event => {
+  const row = event.target.closest('[data-roster-index]');
+  if (row && event.target.dataset.field) rosterDraft[Number(row.dataset.rosterIndex)][event.target.dataset.field] = event.target.value;
+});
+app.addEventListener('dragstart', event => {
+  const row = event.target.closest('[data-rank-index]');
+  if (!row) return;
+  draggedRank = Number(row.dataset.rankIndex); row.classList.add('dragging');
+  event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', String(draggedRank));
+});
+app.addEventListener('dragover', event => {
+  const row = event.target.closest('[data-rank-index]');
+  if (row && draggedRank !== null) { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; row.classList.add('drag-over'); }
+});
+app.addEventListener('dragleave', event => event.target.closest('[data-rank-index]')?.classList.remove('drag-over'));
+app.addEventListener('drop', event => {
+  const row = event.target.closest('[data-rank-index]');
+  if (row && draggedRank !== null) { event.preventDefault(); reorderRank(draggedRank, Number(row.dataset.rankIndex)); }
+  draggedRank = null;
+});
+app.addEventListener('dragend', () => { draggedRank = null; app.querySelectorAll('.dragging, .drag-over').forEach(el => el.classList.remove('dragging', 'drag-over')); });
+
+async function syncWorkspace(force = false) {
+  if (!backend || demo || syncing || busy || actionPending || (!force && (dialog.open || ['INPUT', 'SELECT'].includes(document.activeElement?.tagName)))) return;
+  syncing = true;
+  const revision = workspaceRevision;
+  try {
+    const next = await api('/api/state');
+    if (revision !== workspaceRevision || busy || actionPending) return;
+    if (!equal(next, workspace)) {
+      for (const id of Object.keys(drafts)) if (equal(drafts[id], workspace.preferences[id])) delete drafts[id];
+      setWorkspace(next); render();
+    }
+  } catch (error) { if (force) toast(error.message, true); }
+  finally { syncing = false; }
+}
+async function init() {
+  app.innerHTML = '<div class="boot-screen"><span class="spinner" aria-hidden="true"></span><p>우리의 자리를 준비하고 있어요.</p></div>';
+  if (demo) { workspace.preferences = createDemoPreferences(workspace.participants); drafts = {}; }
+  else {
+    try {
+      const response = await fetch('/api/state', { signal: AbortSignal.timeout(4500) });
+      if (response.ok && response.headers.get('content-type')?.includes('application/json')) { workspace = await response.json(); backend = true; }
+      else throw new Error('static');
+    } catch {
+      const stored = readStorage(storageKeys.state, null);
+      if (stored) {
+        try {
+          validateRoster(stored.participants); validateSubset(stored.participants, stored.preferences);
+          if (stored.result) {
+            const validation = validatePreferences(stored.participants, SEATS, stored.preferences);
+            if (!validation.valid || !stored.result.metrics || findBlockingPairs(stored.participants, SEATS, stored.preferences, stored.result.seatPriorities, stored.result.assignments).length) stored.result = null;
+          }
+          workspace = stored;
+        } catch { toast('저장된 데이터를 읽지 못했습니다. 백업 파일을 불러올 수 있어요.', true); }
+      }
+    }
+  }
+  if (!workspace.participants.some(p => p.id === currentId)) currentId = workspace.participants[0].id;
+  render();
+  setInterval(() => syncWorkspace(), 12000);
+}
+init().catch(error => { app.innerHTML = `<div class="boot-screen"><p>${esc(error.message)}</p><button class="btn" onclick="location.reload()">다시 열기</button></div>`; });

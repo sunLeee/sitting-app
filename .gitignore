@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.local-data/
+.omx/
+artifacts/
+.DS_Store
