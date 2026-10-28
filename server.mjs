@@ -5,11 +5,13 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { createInitialState, PARTS, SEATS, stateFingerprint } from './data.mjs';
 import { findBlockingPairs } from './matching.mjs';
+import { allocateRandomSeats } from './random-allocation.mjs';
+import { fetchPublicPreferenceSheet } from './google-sheet.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const MAX_BODY = 1024 * 1024;
 const seatIds = new Set(SEATS.map(seat => seat.id));
-const publicFiles = new Set(['index.html', 'app.mjs', 'styles.css', 'data.mjs', 'matching.mjs', 'allocation-worker.mjs', 'sheet-input.mjs', 'random-preferences.mjs']);
+const publicFiles = new Set(['index.html', 'app.mjs', 'styles.css', 'data.mjs', 'matching.mjs', 'allocation-worker.mjs', 'sheet-input.mjs', 'random-preferences.mjs', 'random-allocation.mjs']);
 const mime = { '.html': 'text/html; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.svg': 'image/svg+xml', '.webp': 'image/webp', '.ico': 'image/x-icon' };
 class ApiError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -43,8 +45,15 @@ function validatePreferences(preferences, participants) {
 }
 function validateResult(result, state) {
   requireThat(object(result) && Array.isArray(result.assignments), '유효한 배정 결과가 필요합니다.');
-  requireThat(['distance', 'preference'].includes(result.mode) && (typeof result.seed === 'string' || (typeof result.seed === 'number' && Number.isFinite(result.seed))), '배정 모드 또는 추첨 시드가 올바르지 않습니다.');
+  requireThat(['distance', 'preference', 'random'].includes(result.mode) && (typeof result.seed === 'string' || (typeof result.seed === 'number' && Number.isFinite(result.seed))), '배정 모드 또는 추첨 시드가 올바르지 않습니다.');
   requireThat(result.assignments.length === state.participants.length, '모든 참가자에게 한 자리씩 배정해야 합니다.');
+  if (result.mode === 'random') {
+    const expected = allocateRandomSeats({ participants: state.participants, seats: SEATS, seed: result.seed });
+    requireThat(result.assignments.every((entry, index) => object(entry) && entry.participantId === expected.assignments[index].participantId && entry.seatId === expected.assignments[index].seatId && entry.rank === null), '랜덤 배정이 명단과 추첨 시드에 일치하지 않습니다.');
+    requireThat(object(result.metrics) && Object.entries(expected.metrics).every(([key, value]) => value === null ? result.metrics[key] === null : Number.isFinite(result.metrics[key]) && Math.abs(result.metrics[key] - value) <= 1e-8), '랜덤 배정 통계가 실제 결과와 일치하지 않습니다.');
+    requireThat(result.anchors === null && result.seatPriorities === null, '완전 랜덤 추첨에는 파트 기준 좌석이나 좌석 우선순위를 사용하지 않습니다.');
+    return expected;
+  }
   const people = new Map(state.participants.map(person => [person.id, person]));
   const assignedPeople = new Set(), assignedSeats = new Set();
   let rankSum = 0, top3Count = 0, totalDistance = 0, pairs = 0;
@@ -81,7 +90,7 @@ function validateState(value) {
   const state = { version: 1, participants, preferences, result: null, updatedAt: value.updatedAt ?? null };
   requireThat(state.updatedAt === null || (typeof state.updatedAt === 'string' && Number.isFinite(Date.parse(state.updatedAt))), '저장 시간이 올바르지 않습니다.');
   if (value.result !== null && value.result !== undefined) {
-    requireThat(participants.every(person => Object.hasOwn(preferences, person.id)), '저장 결과에 지망 목록이 누락되었습니다.');
+    requireThat(value.result.mode === 'random' || participants.every(person => Object.hasOwn(preferences, person.id)), '저장 결과에 지망 목록이 누락되었습니다.');
     state.result = validateResult(value.result, state);
   }
   return state;
@@ -123,6 +132,10 @@ export async function createServer({ dataDir = path.join(ROOT, '.local-data'), r
       requireThat(!pathname.includes('\\') && !pathname.includes('\0') && !pathname.split('/').some(segment => segment === '..' || segment === '.') && !/%[0-9a-f]{2}/i.test(pathname), '접근할 수 없는 경로입니다.', 403);
       if (pathname.startsWith('/api/')) {
         if (request.method === 'GET' && pathname === '/api/state') { await queue; return json(response, 200, state); }
+        if (request.method === 'POST' && pathname === '/api/sheets') {
+          const body = await readJson(request);
+          return json(response, 200, await fetchPublicPreferenceSheet(body.url));
+        }
         const preferenceMatch = /^\/api\/preferences\/([^/]+)$/.exec(pathname);
         const allowed = (request.method === 'PUT' && (preferenceMatch || ['/api/participants', '/api/result'].includes(pathname))) || (request.method === 'POST' && pathname === '/api/import');
         requireThat(allowed, '요청한 API를 찾을 수 없습니다.', 404);
@@ -140,9 +153,10 @@ export async function createServer({ dataDir = path.join(ROOT, '.local-data'), r
             next.result = null;
           } else if (pathname === '/api/result') {
             requireThat(body.fingerprint === stateFingerprint(state), '지망 또는 참가자가 변경되었습니다. 최신 데이터로 다시 추첨해 주세요.', 409);
-            requireThat(next.participants.every(person => Object.hasOwn(next.preferences, person.id)), '모든 참가자의 21지망을 먼저 저장해 주세요.', 409);
+            requireThat(body.result?.mode === 'random' || next.participants.every(person => Object.hasOwn(next.preferences, person.id)), '모든 참가자의 21지망을 먼저 저장해 주세요.', 409);
             next.result = validateResult(body.result, next);
           } else {
+            if (Object.hasOwn(body, 'fingerprint')) requireThat(body.fingerprint === stateFingerprint(state), '명단 또는 제출 선호가 변경되었습니다. 최신 상태를 불러온 뒤 다시 가져와 주세요.', 409);
             if (Object.hasOwn(body, 'participants')) {
               next.participants = validateParticipants(body.participants);
               next.preferences = Object.fromEntries(next.participants.filter(person => Object.hasOwn(state.preferences, person.id)).map(person => [person.id, state.preferences[person.id]]));

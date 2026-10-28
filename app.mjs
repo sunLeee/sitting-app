@@ -2,6 +2,7 @@ import { PARTS, ZONES, SEATS, INITIAL_PARTICIPANTS, createInitialState, createDe
 import { validatePreferences, findBlockingPairs } from './matching.mjs';
 import { parsePreferenceSheet, createSheetTemplate, serializePreferenceSheet, SHEET_HEADERS } from './sheet-input.mjs';
 import { createRandomPreferences, DEFAULT_RANDOM_SEED } from './random-preferences.mjs';
+import { allocateRandomSeats } from './random-allocation.mjs';
 
 const icons = {
   chair: '<rect x="7" y="3" width="10" height="10" rx="3"/><path d="M4 11v6h16v-6M8 17v4m8-4v4m-4-8v4"/>',
@@ -39,6 +40,7 @@ const icons = {
 const icon = (name, className = '') => `<svg class="${className}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || icons.chair}</svg>`;
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const rankLabel = rank => rank === null ? '완전 랜덤 배정' : `${rank}지망`;
 const seatById = new Map(SEATS.map(s => [s.id, s]));
 const storageKeys = { state: 'jari-workspace-v1', drafts: 'jari-drafts-v1', person: 'jari-current-person-v1' };
 const app = document.querySelector('#app');
@@ -100,7 +102,8 @@ function setWorkspace(value) {
   if (!demo && !backend && !writeStorage(storageKeys.state, workspace)) toast('브라우저 저장 공간이 부족합니다. 백업 파일을 내려받아 주세요.', true);
 }
 async function api(path, options = {}) {
-  const response = await fetch(path, { ...options, headers: { 'Content-Type': 'application/json', ...options.headers }, signal: AbortSignal.timeout(12000) });
+  const { timeoutMs = 12000, ...requestOptions } = options;
+  const response = await fetch(path, { ...requestOptions, headers: { 'Content-Type': 'application/json', ...requestOptions.headers }, signal: AbortSignal.timeout(timeoutMs) });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.error || '저장하지 못했습니다. 다시 시도해 주세요.');
   return payload;
@@ -133,7 +136,7 @@ function render() {
     <div class="main-shell">
       <header class="topbar"><div class="breadcrumb">${icon('building')}<span>플랫폼개발팀</span><span>/</span><strong>13층 자리 추첨</strong></div><div class="topbar-actions"><span class="connection"><span class="status-dot"></span>${demo ? '예시 워크스페이스' : backend ? '로컬 서버 연결됨' : '브라우저 저장 모드'}</span><span class="avatar">P</span></div></header>
       <main id="main" class="content">
-        <div class="intro"><div><p class="eyebrow">A BETTER PLACE TO WORK, TOGETHER</p><h1>${isResult && result ? '우리의 새로운 자리' : view === 'preferences' ? '내가 원하는 자리부터' : '좋은 자리, 함께 정해요'}</h1><p class="intro-description">${isResult && result ? '선호를 존중하고, 같은 파트는 더 가까이. 새로운 자리를 확인해 보세요.' : '개인의 선호는 존중하고, 같은 파트는 더 가까이.'}</p></div><div class="intro-actions"><button class="btn" data-action="manage">${icon('users')} 참여자 관리</button><button class="btn btn-primary" data-action="${isResult && result ? 'download-csv' : 'draw-settings'}" ${!allSubmitted() && !(isResult && result) ? `disabled title="모든 참여자가 21개 선호를 저장하면 배정할 수 있습니다"` : ''}>${icon(isResult && result ? 'download' : 'sparkle')}${isResult && result ? '결과 내려받기' : '배정 시작하기'}</button></div></div>
+        <div class="intro"><div><p class="eyebrow">A BETTER PLACE TO WORK, TOGETHER</p><h1>${isResult && result ? '우리의 새로운 자리' : view === 'preferences' ? '내가 원하는 자리부터' : '좋은 자리, 함께 정해요'}</h1><p class="intro-description">${isResult && result ? result.mode === 'random' ? '전원의 좌석을 랜덤으로 추첨했습니다. 새로운 자리를 확인해 보세요.' : '선호를 존중하고, 같은 파트는 더 가까이. 새로운 자리를 확인해 보세요.' : '개인의 선호는 존중하고, 같은 파트는 더 가까이.'}</p></div><div class="intro-actions"><button class="btn" data-action="manage">${icon('users')} 참여자 관리</button><button class="btn" data-action="public-sheet">${icon('upload')}공개 시트로 배정</button><button class="btn btn-soft" data-action="random-settings">${icon('sparkle')}올 랜덤</button><button class="btn btn-primary" data-action="${isResult && result ? 'download-csv' : 'draw-settings'}" ${!allSubmitted() && !(isResult && result) ? `disabled title="모든 참여자가 21개 선호를 저장하면 배정할 수 있습니다"` : ''}>${icon(isResult && result ? 'download' : 'sparkle')}${isResult && result ? '결과 내려받기' : '배정 시작하기'}</button></div></div>
         ${demo ? '<div class="demo-banner"><div><strong>미리보기 모드</strong> · 예시 선호로 체험 중이며 실제 제출 내역은 바뀌지 않습니다.</div><button data-action="exit-demo">실제 입력으로 돌아가기</button></div>' : ''}
         <div class="steps" aria-label="자리 배정 진행 단계">
           <button class="step ${view === 'seats' ? 'active' : ''} ${count > 0 ? 'complete' : ''}" data-action="navigate" data-view="seats"><span class="step-number">${count > 0 ? icon('check') : '01'}</span><span><strong>좌석 둘러보기</strong><small>나에게 맞는 자리를 찾아요</small></span></button>${icon('chevron', 'step-arrow')}
@@ -160,7 +163,7 @@ function mapCard(showResults) {
         const index = ranking.indexOf(s.id);
         const entry = assignments.get(s.id);
         const occupant = entry ? people.get(entry.participantId) : null;
-        const label = `${zone}구역 ${s.id}번 좌석, ${info.electric ? '전동' : '고정'} 책상, ${info.partition ? '파티션 있음' : '파티션 없음'}${showResults ? occupant ? `, ${occupant.name}, ${PARTS[occupant.part].label}, ${entry.rank}지망` : ', 빈자리' : index >= 0 ? `, ${index + 1}지망, 누르면 좌석 정보` : `, 누르면 ${ranking.length + 1}지망으로 추가`}`;
+        const label = `${zone}구역 ${s.id}번 좌석, ${info.electric ? '전동' : '고정'} 책상, ${info.partition ? '파티션 있음' : '파티션 없음'}${showResults ? occupant ? `, ${occupant.name}, ${PARTS[occupant.part].label}, ${rankLabel(entry.rank)}` : ', 빈자리' : index >= 0 ? `, ${index + 1}지망, 누르면 좌석 정보` : `, 누르면 ${ranking.length + 1}지망으로 추가`}`;
         return `<button class="seat ${!showResults && index >= 0 ? 'ranked' : ''} ${s.id === selectedSeat && !showResults ? 'selected' : ''} ${occupant ? `part-${occupant.part}` : ''}" data-action="seat" data-seat="${s.id}" aria-label="${esc(label)}" title="${esc(label)}" ${!showResults ? `aria-pressed="${index >= 0}"` : ''}><span class="seat-body">${icon('monitor')}<span>${s.id}</span></span>${showResults ? `<span class="seat-occupant">${occupant ? esc(occupant.name) : '빈자리'}</span>` : index >= 0 ? `<span class="seat-rank">${index + 1}</span>` : ''}</button>`;
       }).join('')}</div></section>`).join('')}
       <div class="aisle aisle-one"></div><div class="aisle aisle-two"></div><div class="corridor"><span>통로</span></div><div class="room room-meeting">${icon('users')}<span>MEETING ROOM</span></div><div class="room room-oa">${icon('printer')}<span>OA ZONE</span></div><div class="room room-idea">${icon('monitor')}<span>IDEA ROOM</span></div><div class="entrance">${icon('door')} 출입구</div>
@@ -195,14 +198,15 @@ function participantRows(showResults) {
   return filteredPeople().map(person => {
     const saved = workspace.preferences[person.id];
     const assignment = result.get(person.id);
-    return `<tr><td><div class="person-name"><span class="mini-avatar ${person.part}">${esc(person.name.slice(0, 1))}</span>${esc(person.name)}</div></td><td>${partChip(person.part)}</td><td>${showResults ? `<span class="submitted-status">${icon('checkcircle')}${assignment.rank}지망 배정</span>` : saved ? `<span class="submitted-status">${icon('checkcircle')}입력 완료</span>` : '<span class="status-pending"><span class="pending-dot"></span>입력 대기</span>'}</td><td>${showResults && assignment ? `${seatById.get(assignment.seatId).zone}구역 · ${assignment.seatId}번` : saved ? `${seatById.get(saved[0]).zone}구역 · ${saved[0]}번` : '—'}</td><td><button class="row-edit" data-action="choose-person" data-person="${esc(person.id)}">${showResults ? '결과 보기' : '선호 입력'} ${icon('chevron')}</button></td></tr>`;
+    return `<tr><td><div class="person-name"><span class="mini-avatar ${person.part}">${esc(person.name.slice(0, 1))}</span>${esc(person.name)}</div></td><td>${partChip(person.part)}</td><td>${showResults ? `<span class="submitted-status">${icon('checkcircle')}${assignment.rank === null ? rankLabel(assignment.rank) : `${assignment.rank}지망 배정`}</span>` : saved ? `<span class="submitted-status">${icon('checkcircle')}입력 완료</span>` : '<span class="status-pending"><span class="pending-dot"></span>입력 대기</span>'}</td><td>${showResults && assignment ? `${seatById.get(assignment.seatId).zone}구역 · ${assignment.seatId}번` : saved ? `${seatById.get(saved[0]).zone}구역 · ${saved[0]}번` : '—'}</td><td><button class="row-edit" data-action="choose-person" data-person="${esc(person.id)}">${showResults ? '결과 보기' : '선호 입력'} ${icon('chevron')}</button></td></tr>`;
   }).join('') || '<tr><td colspan="5" class="table-empty">검색 결과가 없습니다.</td></tr>';
 }
 function participantsCard(showResults) {
-  return `<section class="card participants-card" aria-labelledby="participants-title"><div class="card-header participants-header"><div><div class="card-heading"><h2 id="participants-title">${showResults ? '모두의 배정 결과' : '함께하는 사람들'}</h2><span class="count-pill">${workspace.participants.length}명</span></div><p class="card-kicker">${showResults ? '파트별 배정과 개인별 지망 순위를 확인해요.' : `모든 참여자가 선호를 입력하면 배정을 시작할 수 있어요. 빈자리 ${SEATS.length - workspace.participants.length}석`}</p></div><div class="participants-tools"><button class="btn" data-action="import">${icon('upload')}표·파일 가져오기</button><button class="btn" data-action="sheet-template">${icon('list')}입력 양식</button><button class="btn" data-action="${showResults ? 'download-csv' : 'export-workspace'}">${icon('download')}${showResults ? 'CSV 내보내기' : '내보내기'}</button></div></div><div class="participants-toolbar"><div class="filters">${[['all', '전체'], ...Object.entries(PARTS).map(([id, p]) => [id, p.label])].map(([id, label]) => `<button class="filter ${filter === id ? 'active' : ''}" data-action="filter" data-part="${id}">${id !== 'all' ? `<span class="part-dot ${id}"></span>` : ''}${label}<span>${id === 'all' ? workspace.participants.length : workspace.participants.filter(p => p.part === id).length}</span></button>`).join('')}</div><label class="search-field">${icon('search')}<input id="person-search" type="search" value="${esc(search)}" placeholder="이름 검색" aria-label="참여자 이름 검색"/></label></div><div class="table-scroll"><table><thead><tr><th scope="col">참여자</th><th scope="col">소속 파트</th><th scope="col">${showResults ? '배정 지망' : '입력 상태'}</th><th scope="col">${showResults ? '배정 좌석' : '1지망 좌석'}</th><th scope="col">${showResults ? '결과' : '선호 관리'}</th></tr></thead><tbody id="participant-rows">${participantRows(showResults)}</tbody></table></div><div class="table-footer"><span>이미지 기준 명단 · 초록색 인원 제외</span><span>${showResults ? `<strong>${workspace.result.metrics.matchedCount}명 배정 완료</strong>` : `<strong>${submittedCount()}명</strong> / ${workspace.participants.length}명 입력 완료`}</span></div></section>`;
+  return `<section class="card participants-card" aria-labelledby="participants-title"><div class="card-header participants-header"><div><div class="card-heading"><h2 id="participants-title">${showResults ? '모두의 배정 결과' : '함께하는 사람들'}</h2><span class="count-pill">${workspace.participants.length}명</span></div><p class="card-kicker">${showResults ? workspace.result.mode === 'random' ? '완전 랜덤으로 추첨한 전원의 좌석을 확인해요.' : '파트별 배정과 개인별 지망 순위를 확인해요.' : `모든 참여자가 선호를 입력하면 배정을 시작할 수 있어요. 빈자리 ${SEATS.length - workspace.participants.length}석`}</p></div><div class="participants-tools"><button class="btn" data-action="import">${icon('upload')}표·파일 가져오기</button><button class="btn" data-action="sheet-template">${icon('list')}입력 양식</button><button class="btn" data-action="${showResults ? 'download-csv' : 'export-workspace'}">${icon('download')}${showResults ? 'CSV 내보내기' : '내보내기'}</button></div></div><div class="participants-toolbar"><div class="filters">${[['all', '전체'], ...Object.entries(PARTS).map(([id, p]) => [id, p.label])].map(([id, label]) => `<button class="filter ${filter === id ? 'active' : ''}" data-action="filter" data-part="${id}">${id !== 'all' ? `<span class="part-dot ${id}"></span>` : ''}${label}<span>${id === 'all' ? workspace.participants.length : workspace.participants.filter(p => p.part === id).length}</span></button>`).join('')}</div><label class="search-field">${icon('search')}<input id="person-search" type="search" value="${esc(search)}" placeholder="이름 검색" aria-label="참여자 이름 검색"/></label></div><div class="table-scroll"><table><thead><tr><th scope="col">참여자</th><th scope="col">소속 파트</th><th scope="col">${showResults ? '배정 지망' : '입력 상태'}</th><th scope="col">${showResults ? '배정 좌석' : '1지망 좌석'}</th><th scope="col">${showResults ? '결과' : '선호 관리'}</th></tr></thead><tbody id="participant-rows">${participantRows(showResults)}</tbody></table></div><div class="table-footer"><span>이미지 기준 명단 · 초록색 인원 제외</span><span>${showResults ? `<strong>${workspace.result.metrics.matchedCount}명 배정 완료</strong>` : `<strong>${submittedCount()}명</strong> / ${workspace.participants.length}명 입력 완료`}</span></div></section>`;
 }
 function resultStats() {
   const m = workspace.result.metrics;
+  if (workspace.result.mode === 'random') return `<div class="result-stats"><div class="card stat-card"><div><span class="stat-label">랜덤 배정 완료</span><strong class="stat-value">${m.matchedCount}<small>명</small></strong><p>전원의 좌석을 중복 없이 추첨</p></div>${icon('sparkle')}</div><div class="card stat-card"><div><span class="stat-label">빈자리</span><strong class="stat-value">${m.vacancies}<small>석</small></strong><p>배정 지망은 해당 없음</p></div>${icon('chair')}</div><div class="card stat-card"><div><span class="stat-label">같은 파트 평균 거리</span><strong class="stat-value">${m.averageDistance.toFixed(2)}<small>상대 단위</small></strong><p>추첨 결과의 거리 · 도면 좌표 기준</p></div>${icon('users')}</div></div>`;
   return `<div class="result-stats"><div class="card stat-card"><div><span class="stat-label">평균 배정 지망</span><strong class="stat-value">${m.averageRank.toFixed(1)}<small>지망</small></strong><p>개인별 실제 선호 순위 기준</p></div>${icon('target')}</div><div class="card stat-card"><div><span class="stat-label">3지망 이내 배정</span><strong class="stat-value">${m.top3Count}<small>/ ${m.matchedCount}명</small></strong><p>좋아하는 자리에 조금 더 가까이</p></div>${icon('checkcircle')}</div><div class="card stat-card"><div><span class="stat-label">같은 파트 평균 거리</span><strong class="stat-value">${m.averageDistance.toFixed(2)}<small>상대 단위</small></strong><p>도면 좌표 기준 · 실제 미터 아님</p></div>${icon('users')}</div></div>`;
 }
 function resultPanel(person) {
@@ -210,7 +214,7 @@ function resultPanel(person) {
   const assignment = result.assignments.find(a => a.participantId === person.id);
   const seat = seatById.get(assignment.seatId);
   const zone = ZONES[seat.zone];
-  return `<section class="card result-panel" aria-labelledby="my-result-title"><h2 id="my-result-title">나의 새로운 자리</h2><p class="result-panel-sub">새로운 자리에서 만나요.</p>${personSelect(person, '배정 결과를 확인할 참여자')}<div class="result-person"><span class="mini-avatar ${person.part}">${esc(person.name.slice(0, 1))}</span><div><strong>${esc(person.name)} 님</strong>${partChip(person.part)}</div></div><div class="result-seat-large"><strong>${assignment.seatId}</strong><p>${seat.zone}구역 · 13층</p><span class="part-chip">${icon('check')} 나의 ${assignment.rank}지망</span></div><div class="result-detail"><div><span>책상 유형</span><strong>${zone.electric ? '전동 데스크' : '고정 데스크'}</strong></div><div><span>모니터</span><strong>싱글</strong></div><div><span>좌/우 파티션</span><strong>${zone.partition ? '있음' : '없음'}</strong></div></div><button class="btn btn-soft btn-full" data-action="zone-info" data-zone="${seat.zone}">${icon('chair')}내 자리 자세히 보기</button><div class="result-method">추첨 시드 <strong>${esc(result.seed)}</strong><br>${result.mode === 'distance' ? `안정 매칭 후보 ${result.metrics.candidateCount.toLocaleString()}개를 비교했어요.` : '개인 지망을 제안 순서로 사용하는 안정 매칭이에요.'}<br><button data-action="guide">배정 기준 살펴보기 ${icon('arrow')}</button></div></section>`;
+  return `<section class="card result-panel" aria-labelledby="my-result-title"><h2 id="my-result-title">나의 새로운 자리</h2><p class="result-panel-sub">새로운 자리에서 만나요.</p>${personSelect(person, '배정 결과를 확인할 참여자')}<div class="result-person"><span class="mini-avatar ${person.part}">${esc(person.name.slice(0, 1))}</span><div><strong>${esc(person.name)} 님</strong>${partChip(person.part)}</div></div><div class="result-seat-large"><strong>${assignment.seatId}</strong><p>${seat.zone}구역 · 13층</p><span class="part-chip">${icon('check')} ${assignment.rank === null ? rankLabel(assignment.rank) : `나의 ${assignment.rank}지망`}</span></div><div class="result-detail"><div><span>책상 유형</span><strong>${zone.electric ? '전동 데스크' : '고정 데스크'}</strong></div><div><span>모니터</span><strong>싱글</strong></div><div><span>좌/우 파티션</span><strong>${zone.partition ? '있음' : '없음'}</strong></div></div><button class="btn btn-soft btn-full" data-action="zone-info" data-zone="${seat.zone}">${icon('chair')}내 자리 자세히 보기</button><div class="result-method">추첨 시드 <strong>${esc(result.seed)}</strong><br>${result.mode === 'distance' ? `안정 매칭 후보 ${result.metrics.candidateCount.toLocaleString()}개를 비교했어요.` : result.mode === 'random' ? '선호·파트와 무관하게 좌석을 섞은 완전 랜덤 추첨이에요.' : '개인 지망을 제안 순서로 사용하는 안정 매칭이에요.'}<br><button data-action="guide">배정 기준 살펴보기 ${icon('arrow')}</button></div></section>`;
 }
 function emptyResults() {
   return `<section class="card empty-results">${icon('chair')}<h2>아직 새로운 자리를 정하지 않았어요</h2><p>${submittedCount()} / ${workspace.participants.length}명이 21개 선호를 입력했습니다.<br>모든 참여자가 입력하면 배정을 시작할 수 있어요.</p><button class="btn btn-primary" data-action="${allSubmitted() ? 'draw-settings' : 'navigate'}" ${allSubmitted() ? '' : 'data-view="preferences"'}>${allSubmitted() ? '배정 시작하기' : '내 선호 입력하기'}${icon('arrow')}</button><button class="btn btn-quiet" data-action="enter-demo">예시로 미리 체험하기</button></section>`;
@@ -224,12 +228,13 @@ function openDialog({ title, subtitle = '', body, footer = '', wide = false }) {
 }
 function closeDialog() { if (!busy) dialog.close(); }
 function guideDialog() {
-  openDialog({ title: '좋은 자리를 정하는 방법', subtitle: '선호와 팀의 가까움을 함께 고려합니다.', body: `
+  openDialog({ title: '좋은 자리를 정하는 방법', subtitle: '선호 기반 배정과 완전 랜덤 추첨을 선택할 수 있어요.', body: `
     <div class="guide-item"><span>01</span><div><h3>21개 좌석을 원하는 순서대로</h3><p>이름을 선택한 뒤 지도에서 좌석을 눌러 1지망부터 21지망까지 정해요. A는 전동·파티션, B는 전동·오픈형, C는 고정·파티션 좌석입니다. 화살표로 순서를 바꾸고, 모두 선택하면 선호를 저장할 수 있어요.</p></div></div>
     <div class="guide-item"><span>02</span><div><h3>같은 파트는 더 가까이</h3><p>노랑은 배차, 파랑은 데이터, 빨강은 맵입니다. 파트마다 기준 좌석을 바꾸면서 좌석 측 우선순위를 만들고, 각 참여자는 자신의 지망 순서대로 좌석에 제안합니다. 같은 조건에서는 추첨 시드가 우선순위를 정해요.</p></div></div>
     <div class="guide-item"><span>03</span><div><h3>안정 매칭 후보를 비교해요</h3><p>게일–섀플리 알고리즘으로 각 후보를 배정한 뒤, 같은 파트의 모든 두 사람 사이 거리 합이 가장 작은 후보를 선택해요. 거리가 같으면 평균 배정 지망이 더 좋은 후보를 택합니다. 21석에서는 기준 좌석 조합 7,980개와 기본 후보 1개를 비교해요.</p></div></div>
-    <div class="guide-item"><span>04</span><div><h3>같은 입력, 같은 시드, 같은 결과</h3><p>선호와 참여자, 추첨 시드가 같으면 결과도 같습니다. 결과에서 개인별 배정 지망과 파트별 거리를 확인하고 CSV 또는 재현용 JSON으로 내려받을 수 있어요. 실제 배정은 저장된 선호를 기준으로 합니다.</p></div></div>
-    <div class="dialog-note">거리 단위는 이미지의 상대 좌표입니다. 실제 미터 단위가 필요하면 실측 좌표를 반영해야 합니다. 게일–섀플리만으로 전체 거리의 전역 최솟값을 보장할 수는 없으며, 비교한 후보 중 최소 거리를 선택합니다. 각 결과는 선택된 좌석 측 우선순위에 대해 안정적입니다.</div>
+    <div class="guide-item"><span>04</span><div><h3>같은 입력, 같은 시드, 같은 결과</h3><p>선호와 참여자, 추첨 시드가 같으면 결과도 같습니다. 결과에서 개인별 배정 지망과 파트별 거리를 확인하고 CSV 또는 재현용 JSON으로 내려받을 수 있어요. 선호 기반 배정은 제출된 21지망을 사용하고, 완전 랜덤 추첨은 좌석을 섞어 배정합니다.</p></div></div>
+    <div class="guide-item"><span>05</span><div><h3>전원을 올 랜덤으로 배정하기</h3><p>올 랜덤에서 전원의 21지망을 생성해 파트 거리 기준으로 배정하거나, 선호·파트와 무관하게 좌석만 섞는 완전 랜덤 추첨을 선택합니다. 완전 랜덤의 배정 지망은 해당 없음으로 표시하고, 파트 거리는 추첨 결과를 측정한 값입니다.</p></div></div>
+    <div class="dialog-note">거리 단위는 이미지의 상대 좌표입니다. 실제 미터 단위가 필요하면 실측 좌표를 반영해야 합니다. 게일–섀플리만으로 전체 거리의 전역 최솟값을 보장할 수는 없으며, 비교한 후보 중 최소 거리를 선택합니다. 선호 기반 배정의 결과는 선택된 좌석 측 우선순위에 대해 안정적입니다.</div>
     <div class="dialog-note">${backend ? '이 로컬 서버에 연결한 브라우저의 제출 내용은 함께 저장됩니다. 서버를 다시 실행해도 제출 내용이 남아요.' : '현재는 브라우저 저장 모드입니다. 다른 기기의 선호는 개인별 JSON 파일로 내보낸 뒤, 파일 불러오기로 취합해 주세요.'} 예시 체험은 실제 제출 내용을 바꾸지 않습니다.</div>`, footer: '<button class="btn btn-primary" data-action="close-dialog">확인했어요</button>' });
 }
 function zoneDialog(zoneId, seatId) {
@@ -237,22 +242,34 @@ function zoneDialog(zoneId, seatId) {
   const ranking = getDraft();
   const entry = view === 'results' && workspace.result ? workspace.result.assignments.find(a => a.seatId === seatId) : null;
   const occupant = entry ? workspace.participants.find(p => p.id === entry.participantId) : null;
-  openDialog({ title: `${zoneId}구역${seatId ? ` · ${seatId}번 좌석` : ''}`, subtitle: z.name, body: `<img class="zone-dialog-photo" src="${zoneId === 'C' ? 'assets/zone-c-overview.jpg' : z.photo}" alt="${zoneId}구역의 실제 좌석 사진"/><p>${z.description}${occupant ? ` ${esc(occupant.name)} 님이 ${entry.rank}지망으로 배정됐습니다.` : ''}</p><div class="zone-dialog-features"><span class="feature">${icon('electric')}${z.electric ? '전동 높이 조절' : '고정 높이'}</span><span class="feature">${icon('monitor')}싱글 모니터</span><span class="feature">${icon('partition')}좌/우 파티션 ${z.partition ? '있음' : '없음'}</span></div><div class="zone-seat-list">${SEATS.filter(s => s.zone === zoneId).map(s => `<button class="btn ${ranking.includes(s.id) && view !== 'results' ? 'btn-soft' : ''}" data-action="dialog-seat" data-seat="${s.id}">${s.id}번${view !== 'results' && ranking.includes(s.id) ? ` · ${ranking.indexOf(s.id) + 1}지망` : ''}</button>`).join('')}</div>`, footer: `${view !== 'results' ? `<button class="btn btn-soft" data-action="add-zone" data-zone="${zoneId}">남은 ${zoneId}구역 좌석을 선호에 추가</button>` : ''}<button class="btn btn-primary" data-action="close-dialog">확인</button>` });
+  openDialog({ title: `${zoneId}구역${seatId ? ` · ${seatId}번 좌석` : ''}`, subtitle: z.name, body: `<img class="zone-dialog-photo" src="${zoneId === 'C' ? 'assets/zone-c-overview.jpg' : z.photo}" alt="${zoneId}구역의 실제 좌석 사진"/><p>${z.description}${occupant ? ` ${esc(occupant.name)} 님이 ${entry.rank === null ? '완전 랜덤 추첨으로' : `${entry.rank}지망으로`} 배정됐습니다.` : ''}</p><div class="zone-dialog-features"><span class="feature">${icon('electric')}${z.electric ? '전동 높이 조절' : '고정 높이'}</span><span class="feature">${icon('monitor')}싱글 모니터</span><span class="feature">${icon('partition')}좌/우 파티션 ${z.partition ? '있음' : '없음'}</span></div><div class="zone-seat-list">${SEATS.filter(s => s.zone === zoneId).map(s => `<button class="btn ${ranking.includes(s.id) && view !== 'results' ? 'btn-soft' : ''}" data-action="dialog-seat" data-seat="${s.id}">${s.id}번${view !== 'results' && ranking.includes(s.id) ? ` · ${ranking.indexOf(s.id) + 1}지망` : ''}</button>`).join('')}</div>`, footer: `${view !== 'results' ? `<button class="btn btn-soft" data-action="add-zone" data-zone="${zoneId}">남은 ${zoneId}구역 좌석을 선호에 추가</button>` : ''}<button class="btn btn-primary" data-action="close-dialog">확인</button>` });
 }
 function drawSettings() {
   if (!allSubmitted()) { toast(`아직 ${workspace.participants.length - submittedCount()}명의 선호가 필요합니다.`); return; }
   openDialog({ title: '우리의 자리를 정해볼까요?', subtitle: '저장된 선호로 배정합니다. 같은 시드로 결과를 재현할 수 있어요.', body: `<div class="draw-summary"><span>참여자 <strong>${workspace.participants.length}명</strong></span><span>선호 입력 <strong>${submittedCount()}명 완료</strong></span><span>빈자리 <strong>${21 - workspace.participants.length}석</strong></span></div><div class="setting-field"><label class="field-label" for="draw-seed">추첨 시드</label><input class="input" id="draw-seed" value="${esc(workspace.result?.seed || 'jari-2026-13F')}" maxlength="64"/><small>동률일 때의 우선순위를 정합니다. 시드를 기록해 두면 동일한 배정을 재현할 수 있어요.</small></div><div class="setting-field"><span class="field-label">배정 기준</span><div class="setting-options"><label class="setting-option"><input type="radio" name="draw-mode" value="distance" checked/><div><strong>파트가 가까워지는 배정</strong><p>개인 지망으로 안정 매칭을 만든 뒤, 같은 파트의 거리 합이 가장 작은 후보를 선택해요.</p></div></label><label class="setting-option"><input type="radio" name="draw-mode" value="preference"/><div><strong>개인 선호 기준 배정</strong><p>파트 거리 우선순위 없이, 시드로 좌석 측 우선순위를 정해 안정 매칭합니다.</p></div></label></div></div><p class="form-error" id="draw-error" role="alert"></p>`, footer: '<button class="btn" data-action="close-dialog">돌아가기</button><button class="btn btn-primary" data-action="run-draw">배정 시작하기</button>' });
 }
+function randomSettings() {
+  openDialog({ title: '올 랜덤으로 자리 정하기', subtitle: `${workspace.participants.length}명 전원을 한 번에 배정합니다.`, body: `<div class="setting-field"><label class="field-label" for="random-seed">추첨 시드 (선택)</label><input class="input" id="random-seed" maxlength="64" placeholder="비워 두면 매번 새로 추첨합니다"/><small>같은 명단과 같은 시드를 사용하면 결과를 재현할 수 있어요.</small></div><div class="setting-options"><label class="setting-option"><input type="radio" name="random-kind" value="distance" checked/><div><strong>랜덤 선호 + 파트 거리 배정</strong><p>전원의 21지망을 랜덤으로 생성하고, 게일–섀플리 후보 중 같은 파트의 거리 합이 가장 작은 결과를 선택합니다. 기존 제출 선호는 랜덤 선호로 갱신됩니다.</p></div></label><label class="setting-option"><input type="radio" name="random-kind" value="random"/><div><strong>완전 랜덤 좌석 추첨</strong><p>선호·파트를 고려하지 않고 좌석을 섞어 한 명씩 추첨합니다. 선호 입력 없이도 배정할 수 있어요.</p></div></label></div><p class="form-error" id="random-error" role="alert"></p>`, footer: '<button class="btn" data-action="close-dialog">돌아가기</button><button class="btn btn-primary" data-action="run-random">전원 랜덤 배정</button>' });
+}
+async function runAllRandom() {
+  const seed = document.querySelector('#random-seed').value.trim() || crypto.randomUUID();
+  const mode = document.querySelector('input[name="random-kind"]:checked').value;
+  if (mode === 'random') return runDraw({ seed, mode });
+  pendingImport = { preferences: createRandomPreferences(workspace.participants, SEATS, seed) };
+  await applyImport({ drawOptions: { seed, mode: 'distance' }, errorId: 'random-error' });
+}
 async function runDraw(options = null) {
-  const seed = options?.seed || document.querySelector('#draw-seed').value.trim();
+  const seed = options?.seed || document.querySelector('#draw-seed')?.value.trim();
   if (!seed) { document.querySelector('#draw-error').textContent = '추첨 시드를 입력해 주세요.'; return; }
   const mode = options?.mode || document.querySelector('input[name="draw-mode"]:checked').value;
   const snapshot = structuredClone(workspace);
   const fingerprint = stateFingerprint(snapshot);
-  const validation = validatePreferences(snapshot.participants, SEATS, snapshot.preferences);
-  if (!validation.valid) { toast(validation.errors[0], true); return; }
+  if (mode !== 'random') {
+    const validation = validatePreferences(snapshot.participants, SEATS, snapshot.preferences);
+    if (!validation.valid) { toast(validation.errors[0], true); return; }
+  }
   busy = true;
-  openDialog({ title: '좋은 자리를 찾고 있어요', body: `<div class="draw-progress"><span class="spinner" aria-hidden="true"></span><h3>선호를 담고, 팀을 더 가까이</h3><p id="draw-progress-text" role="status" aria-live="polite">안정적인 배정 후보를 비교하고 있어요.</p><div class="progress-track"><div class="progress-fill" id="draw-progress-fill" style="width:0%"></div></div></div>` });
+  openDialog({ title: '새로운 자리를 정하고 있어요', body: `<div class="draw-progress"><span class="spinner" aria-hidden="true"></span><h3>${mode === 'random' ? '전원의 좌석을 랜덤으로 추첨합니다' : '선호를 담고, 팀을 더 가까이'}</h3><p id="draw-progress-text" role="status" aria-live="polite">${mode === 'random' ? '좌석을 섞어 한 명씩 배정하고 있어요.' : '안정적인 배정 후보를 비교하고 있어요.'}</p><div class="progress-track"><div class="progress-fill" id="draw-progress-fill" style="width:0%"></div></div></div>` });
   let worker;
   try {
     const result = await new Promise((resolve, reject) => {
@@ -268,7 +285,7 @@ async function runDraw(options = null) {
       worker.onerror = () => reject(new Error('배정 엔진을 실행하지 못했습니다. 서버에서 페이지를 열었는지 확인해 주세요.'));
       worker.postMessage({ participants: snapshot.participants, seats: SEATS, preferences: snapshot.preferences, seed, mode });
     });
-    if (findBlockingPairs(snapshot.participants, SEATS, snapshot.preferences, result.seatPriorities, result.assignments).length) throw new Error('안정 매칭 검증에 실패했습니다. 다시 배정해 주세요.');
+    if (mode !== 'random' && findBlockingPairs(snapshot.participants, SEATS, snapshot.preferences, result.seatPriorities, result.assignments).length) throw new Error('안정 매칭 검증에 실패했습니다. 다시 배정해 주세요.');
     if (backend && !demo) setWorkspace(await api('/api/result', { method: 'PUT', body: JSON.stringify({ result, fingerprint }) }));
     else {
       if (stateFingerprint(workspace) !== fingerprint) throw new Error('입력 내역이 바뀌었습니다. 최신 선호로 다시 배정해 주세요.');
@@ -373,7 +390,7 @@ function downloadCsv() {
   const rows = [['이름', '파트', '구역', '좌석 번호', '배정 지망', '추첨 시드', '배정 기준']];
   for (const person of workspace.participants) {
     const assignment = workspace.result.assignments.find(a => a.participantId === person.id);
-    rows.push([person.name, PARTS[person.part].label, seatById.get(assignment.seatId).zone, assignment.seatId, assignment.rank, workspace.result.seed, workspace.result.mode === 'distance' ? '파트 거리 고려' : '개인 선호 기준']);
+    rows.push([person.name, PARTS[person.part].label, seatById.get(assignment.seatId).zone, assignment.seatId, assignment.rank === null ? '해당 없음' : assignment.rank, workspace.result.seed, workspace.result.mode === 'distance' ? '파트 거리 고려' : workspace.result.mode === 'random' ? '완전 랜덤 추첨' : '개인 선호 기준']);
   }
   for (const seat of SEATS.filter(s => !workspace.result.assignments.some(a => a.seatId === s.id))) rows.push(['빈자리', '', seat.zone, seat.id, '', workspace.result.seed, '']);
   downloadFile(`자리-배정결과${demo ? '-예시' : ''}.csv`, '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n'), 'text/csv;charset=utf-8');
@@ -387,7 +404,7 @@ function sheetInputDialog(text = '', filename = '') {
   sheetText = text;
   sheetPreview = null;
   pendingImport = null;
-  openDialog({ title: 'Google Sheets 표 가져오기', subtitle: filename ? esc(filename) : '머리글을 포함한 표를 복사해 붙여넣거나 CSV·TSV 파일을 선택하세요.', wide: true, body: `<div class="sheet-tools"><button class="btn" data-action="sheet-template">${icon('download')}빈 양식 다운로드</button><button class="btn" data-action="pick-import-file">${icon('upload')}CSV · TSV · JSON 파일 선택</button><button class="btn btn-quiet" data-action="fill-random-sheet">${icon('sparkle')}랜덤 예시 채우기</button>${submittedCount() ? '<button class="btn btn-quiet" data-action="export-sheet">제출 선호 CSV</button>' : ''}</div><label class="field-label" for="sheet-input">이름 / 파트 / 1지망 … 21지망</label><textarea class="sheet-textarea" id="sheet-input" rows="7" spellcheck="false" placeholder="Google Sheets에서 머리글과 작성한 행을 함께 복사해 붙여넣어 주세요.">${esc(sheetText)}</textarea><p class="sheet-help">이름은 참여자 명단과 동일하게, 파트는 데이터·배차·맵, 좌석은 번호만 입력해 주세요. 예: 68, 207, 85</p><button class="btn btn-soft" data-action="preview-sheet">${icon('checkcircle')}표 확인하기</button><div id="sheet-preview" aria-live="polite"></div><p class="form-error" id="import-error" role="alert"></p>`, footer: '<button class="btn" data-action="close-dialog">취소</button><button class="btn btn-primary" data-action="apply-sheet" disabled>검증한 선호 가져오기</button>' });
+  openDialog({ title: 'Google Sheets 표 가져오기', subtitle: filename ? esc(filename) : '머리글을 포함한 표를 복사해 붙여넣거나 CSV·TSV 파일을 선택하세요.', wide: true, body: `<section class="public-sheet-input" aria-label="공개 Google Sheets 링크 입력"><h3>공개 시트 링크로 바로 배정</h3><label class="field-label" for="public-sheet-url">Google Sheets 공개 링크</label><input class="input" id="public-sheet-url" type="url" maxlength="4096" placeholder="https://docs.google.com/spreadsheets/d/…/edit#gid=0"/><p class="sheet-help">공유 → 일반 액세스를 “링크가 있는 모든 사용자: 뷰어”로 설정하거나 “웹에 게시”한 링크를 넣으세요. 선택한 탭의 이름·파트·1~21지망을 읽습니다. 링크 읽기에는 Node 서버 실행이 필요합니다.</p><div class="sheet-draw-options"><div><label class="field-label" for="sheet-seed">추첨 시드 (선택)</label><input class="input" id="sheet-seed" maxlength="64" placeholder="비워 두면 새 시드 생성"/></div><div><label class="field-label" for="sheet-mode">배정 기준</label><select class="input" id="sheet-mode"><option value="distance">파트가 가까워지는 배정</option><option value="preference">개인 선호 기준 배정</option></select></div></div><div class="sheet-tools"><button class="btn" data-action="fetch-public-sheet">시트 미리보기</button><button class="btn btn-primary" data-action="draw-public-sheet">${icon('sparkle')}시트 불러와 배정</button></div><p class="sheet-help" id="sheet-status" role="status" aria-live="polite"></p></section><div class="sheet-tools"><button class="btn" data-action="sheet-template">${icon('download')}빈 양식 다운로드</button><button class="btn" data-action="pick-import-file">${icon('upload')}CSV · TSV · JSON 파일 선택</button><button class="btn btn-quiet" data-action="fill-random-sheet">${icon('sparkle')}랜덤 예시 채우기</button><button class="btn btn-quiet" data-action="copy-sheet-example">예시 표 복사</button><a class="btn" href="https://sheets.new" target="_blank" rel="noopener noreferrer">Google Sheets 새로 만들기</a>${submittedCount() ? '<button class="btn btn-quiet" data-action="export-sheet">제출 선호 CSV</button>' : ''}</div><label class="field-label" for="sheet-input">이름 / 파트 / 1지망 … 21지망</label><textarea class="sheet-textarea" id="sheet-input" rows="7" spellcheck="false" placeholder="Google Sheets에서 머리글과 작성한 행을 함께 복사해 붙여넣어 주세요.">${esc(sheetText)}</textarea><p class="sheet-help">이름은 참여자 명단과 동일하게, 파트는 데이터·배차·맵, 좌석은 번호만 입력해 주세요. 예: 68, 207, 85</p><button class="btn btn-soft" data-action="preview-sheet">${icon('checkcircle')}표 확인하기</button><div id="sheet-preview" aria-live="polite"></div><p class="form-error" id="import-error" role="alert"></p>`, footer: '<button class="btn" data-action="close-dialog">취소</button><button class="btn btn-primary" data-action="apply-sheet" disabled>검증한 선호 가져오기</button>' });
 }
 function previewSheet() {
   sheetText = document.querySelector('#sheet-input').value;
@@ -397,6 +414,62 @@ function previewSheet() {
   const table = sheetPreview.rows.length ? `<div class="sheet-table-scroll"><table class="sheet-preview-table"><thead><tr><th scope="col">행</th>${SHEET_HEADERS.map(header => `<th scope="col">${header}</th>`).join('')}</tr></thead><tbody>${sheetPreview.rows.map(row => `<tr class="${invalidRows.has(row.row) ? 'sheet-invalid-row' : ''}"><td>${row.row}</td><td>${esc(row.name)}</td><td>${esc(row.part ? PARTS[row.part].label : row.inputPart)}</td>${row.ranking.map(id => `<td>${esc(id)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : '';
   document.querySelector('#sheet-preview').innerHTML = summary + table + (sheetPreview.valid ? '<p class="sheet-help">가져오면 해당 참여자의 제출 선호가 갱신되고 기존 배정 결과는 해제됩니다.</p>' : '');
   document.querySelector('[data-action="apply-sheet"]').disabled = !sheetPreview.valid;
+}
+
+async function loadPublicSheet({ draw = false } = {}) {
+  sheetPreview = null;
+  pendingImport = null;
+  document.querySelector('[data-action="apply-sheet"]').disabled = true;
+  document.querySelector('#sheet-preview').innerHTML = '';
+  sheetText = '';
+  document.querySelector('#sheet-input').value = '';
+  if (!backend) { document.querySelector('#import-error').textContent = '공개 링크를 읽으려면 npm start로 Node 서버를 실행하고 접속해 주세요. 표 붙여넣기와 파일 가져오기도 사용할 수 있습니다.'; return; }
+  const url = document.querySelector('#public-sheet-url').value.trim();
+  const seed = document.querySelector('#sheet-seed').value.trim() || crypto.randomUUID();
+  const mode = document.querySelector('#sheet-mode').value;
+  const fingerprint = stateFingerprint(workspace);
+  const controls = [...dialog.querySelectorAll('#public-sheet-url, #sheet-seed, #sheet-mode, #sheet-input, [data-action="fetch-public-sheet"], [data-action="draw-public-sheet"]')];
+  document.querySelector('#import-error').textContent = '';
+  document.querySelector('#sheet-status').textContent = '공개 시트를 읽고 있어요…';
+  actionPending = true;
+  controls.forEach(control => { control.disabled = true; });
+  let readyToDraw = false;
+  try {
+    const sheet = await api('/api/sheets', { method: 'POST', body: JSON.stringify({ url }), timeoutMs: 20000 });
+    sheetText = sheet.text;
+    document.querySelector('#sheet-input').value = sheetText;
+    previewSheet();
+    if (!sheetPreview.valid) throw new Error('시트에 잘못된 입력이 있습니다. 아래 오류와 표를 확인해 주세요.');
+    document.querySelector('#sheet-status').textContent = `${sheetPreview.rows.length}명의 선호를 읽었습니다. 아래 표에서 내용을 확인할 수 있어요.`;
+    if (draw) {
+      const validation = validatePreferences(workspace.participants, SEATS, { ...workspace.preferences, ...sheetPreview.preferences });
+      if (!validation.valid) throw new Error(`배정에 필요한 선호가 부족합니다. ${validation.errors[0]} 시트에 나머지 사람의 21지망을 작성해 주세요.`);
+      pendingImport = { preferences: sheetPreview.preferences };
+      readyToDraw = true;
+    }
+  } catch (error) {
+    document.querySelector('#import-error').textContent = error.message;
+    document.querySelector('#sheet-status').textContent = '공개 시트 불러오기를 완료하지 못했습니다.';
+  } finally {
+    actionPending = false;
+    controls.forEach(control => { control.disabled = false; });
+  }
+  if (readyToDraw) await applyImport({ drawOptions: { seed, mode }, fingerprint });
+}
+
+async function copySheetExample() {
+  const example = serializePreferenceSheet(workspace.participants, createRandomPreferences(workspace.participants, SEATS, DEFAULT_RANDOM_SEED), { delimiter: '\t' });
+  sheetText = example;
+  document.querySelector('#sheet-input').value = example;
+  previewSheet();
+  try {
+    await navigator.clipboard.writeText(example);
+    toast('예시 표를 복사했어요. 새 Google Sheets의 A1 셀에 붙여넣으세요.');
+  } catch {
+    const input = document.querySelector('#sheet-input');
+    input.focus(); input.select();
+    toast('예시 표를 선택했어요. 복사한 뒤 Google Sheets의 A1 셀에 붙여넣으세요.');
+  }
 }
 
 let pendingImport = null;
@@ -422,22 +495,31 @@ async function prepareImport(file) {
   } catch (error) { toast(error instanceof SyntaxError ? 'JSON 파일을 읽을 수 없습니다. 자리에서 내보낸 선호 파일을 선택해 주세요.' : error.message, true); }
 }
 
-async function applyImport() {
+async function applyImport({ drawOptions = null, fingerprint = stateFingerprint(workspace), errorId = 'import-error' } = {}) {
   if (actionPending || !pendingImport) return;
+  if (drawOptions) {
+    const validation = validatePreferences(workspace.participants, SEATS, { ...workspace.preferences, ...pendingImport.preferences });
+    if (!validation.valid) { document.querySelector(`#${errorId}`).textContent = validation.errors[0]; return; }
+  }
   actionPending = true;
+  let succeeded = false;
   try {
-    if (backend && !demo) setWorkspace(await api('/api/import', { method: 'POST', body: JSON.stringify(pendingImport) }));
+    if (backend && !demo) setWorkspace(await api('/api/import', { method: 'POST', body: JSON.stringify({ ...pendingImport, fingerprint }) }));
     else {
+      if (stateFingerprint(workspace) !== fingerprint) throw new Error('명단 또는 제출 선호가 변경되었습니다. 다시 가져와 주세요.');
       const participants = pendingImport.participants || workspace.participants;
       const existing = Object.fromEntries(Object.entries(workspace.preferences).filter(([id]) => participants.some(p => p.id === id)));
       setWorkspace({ ...workspace, participants, preferences: { ...existing, ...pendingImport.preferences }, result: null, updatedAt: new Date().toISOString() });
     }
     for (const id of Object.keys(pendingImport.preferences)) delete drafts[id];
     if (!demo) writeStorage(storageKeys.drafts, drafts);
-    closeDialog(); render(); toast('선호 파일을 적용했어요. 참여 현황에서 확인해 주세요.');
+    closeDialog(); render();
+    if (!drawOptions) toast('선호 파일을 적용했어요. 참여 현황에서 확인해 주세요.');
     pendingImport = null;
-  } catch (error) { document.querySelector('#import-error').textContent = error.message; }
+    succeeded = true;
+  } catch (error) { document.querySelector(`#${errorId}`).textContent = error.message; }
   finally { actionPending = false; }
+  if (succeeded && drawOptions) await runDraw(drawOptions);
 }
 
 function choosePerson(id) {
@@ -487,7 +569,7 @@ function exitDemo() { location.assign(location.pathname); }
 async function handleAction(button) {
   if (busy && button.dataset.action !== 'close-dialog') return;
   const action = button.dataset.action;
-  if (actionPending && ['close-dialog', 'import', 'apply-import', 'apply-sheet', 'preview-sheet', 'fill-random-sheet', 'pick-import-file'].includes(action)) return;
+  if (actionPending) return;
   switch (action) {
     case 'navigate': navigate(button.dataset.view); break;
     case 'guide': guideDialog(); break;
@@ -526,6 +608,8 @@ async function handleAction(button) {
     case 'export-workspace': exportWorkspace(); break;
     case 'download-csv': downloadCsv(); break;
     case 'draw-settings': drawSettings(); break;
+    case 'random-settings': randomSettings(); break;
+    case 'run-random': await runAllRandom(); break;
     case 'run-draw': await runDraw(); break;
     case 'enter-demo': enterDemo(); break;
     case 'exit-demo': exitDemo(); break;
@@ -545,6 +629,10 @@ async function handleAction(button) {
     case 'remove-person': rosterDraft.splice(Number(button.dataset.index), 1); document.querySelector('#roster-list').innerHTML = rosterRows(); document.querySelector('#roster-count').textContent = `(${rosterDraft.length}/21)`; break;
     case 'save-roster': await saveRoster(); break;
     case 'import': sheetInputDialog(); break;
+    case 'public-sheet': sheetInputDialog(); document.querySelector('#public-sheet-url').focus(); break;
+    case 'fetch-public-sheet': await loadPublicSheet(); break;
+    case 'draw-public-sheet': await loadPublicSheet({ draw: true }); break;
+    case 'copy-sheet-example': await copySheetExample(); break;
     case 'pick-import-file': app.querySelector('#import-file').value = ''; app.querySelector('#import-file').click(); break;
     case 'sheet-template': downloadSheetTemplate(); break;
     case 'export-sheet': downloadFile('자리-제출선호.csv', serializePreferenceSheet(workspace.participants, workspace.preferences, { includeBom: true }), 'text/csv;charset=utf-8'); break;
@@ -578,6 +666,12 @@ app.addEventListener('input', event => {
 });
 dialog.addEventListener('input', event => {
   if (event.target.id === 'sheet-input') { sheetText = event.target.value; sheetPreview = null; document.querySelector('[data-action="apply-sheet"]').disabled = true; document.querySelector('#sheet-preview').innerHTML = ''; }
+  if (event.target.id === 'public-sheet-url') {
+    sheetPreview = null; pendingImport = null;
+    document.querySelector('[data-action="apply-sheet"]').disabled = true;
+    document.querySelector('#sheet-preview').innerHTML = '';
+    document.querySelector('#sheet-status').textContent = '';
+  }
   const row = event.target.closest('[data-roster-index]');
   if (row && event.target.dataset.field) rosterDraft[Number(row.dataset.rosterIndex)][event.target.dataset.field] = event.target.value;
 });
@@ -615,7 +709,14 @@ async function syncWorkspace(force = false) {
 }
 async function init() {
   app.innerHTML = '<div class="boot-screen"><span class="spinner" aria-hidden="true"></span><p>우리의 자리를 준비하고 있어요.</p></div>';
-  if (demo) { workspace.preferences = urlParams.has('random') ? createRandomPreferences(workspace.participants, SEATS, urlParams.get('seed') || DEFAULT_RANDOM_SEED) : createDemoPreferences(workspace.participants); drafts = {}; }
+  if (demo) {
+    workspace.preferences = urlParams.has('random') ? createRandomPreferences(workspace.participants, SEATS, urlParams.get('seed') || DEFAULT_RANDOM_SEED) : createDemoPreferences(workspace.participants);
+    drafts = {};
+    try {
+      const response = await fetch('/api/state', { signal: AbortSignal.timeout(4500) });
+      backend = response.ok && !!response.headers.get('content-type')?.includes('application/json');
+    } catch { backend = false; }
+  }
   else {
     try {
       const response = await fetch('/api/state', { signal: AbortSignal.timeout(4500) });
@@ -627,8 +728,13 @@ async function init() {
         try {
           validateRoster(stored.participants); validateSubset(stored.participants, stored.preferences);
           if (stored.result) {
-            const validation = validatePreferences(stored.participants, SEATS, stored.preferences);
-            if (!validation.valid || !stored.result.metrics || findBlockingPairs(stored.participants, SEATS, stored.preferences, stored.result.seatPriorities, stored.result.assignments).length) stored.result = null;
+            if (stored.result.mode === 'random') {
+              const expected = allocateRandomSeats({ participants: stored.participants, seats: SEATS, seed: stored.result.seed });
+              if (!equal(stored.result, expected)) stored.result = null;
+            } else {
+              const validation = validatePreferences(stored.participants, SEATS, stored.preferences);
+              if (!validation.valid || !stored.result.metrics || findBlockingPairs(stored.participants, SEATS, stored.preferences, stored.result.seatPriorities, stored.result.assignments).length) stored.result = null;
+            }
           }
           workspace = stored;
         } catch { toast('저장된 데이터를 읽지 못했습니다. 백업 파일을 불러올 수 있어요.', true); }
