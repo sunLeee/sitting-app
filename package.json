@@ -8,6 +8,7 @@
     "dev": "node server.mjs",
     "test": "node --test tests/*.test.mjs",
     "test:browser": "node tests/browser-smoke.mjs",
+    "sample": "node scripts/sample.mjs",
     "check": "node scripts/check.mjs",
     "build": "node scripts/build.mjs"
   },

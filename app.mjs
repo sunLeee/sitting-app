@@ -1,5 +1,7 @@
 import { PARTS, ZONES, SEATS, INITIAL_PARTICIPANTS, createInitialState, createDemoPreferences, stateFingerprint } from './data.mjs';
 import { validatePreferences, findBlockingPairs } from './matching.mjs';
+import { parsePreferenceSheet, createSheetTemplate, serializePreferenceSheet, SHEET_HEADERS } from './sheet-input.mjs';
+import { createRandomPreferences, DEFAULT_RANDOM_SEED } from './random-preferences.mjs';
 
 const icons = {
   chair: '<rect x="7" y="3" width="10" height="10" rx="3"/><path d="M4 11v6h16v-6M8 17v4m8-4v4m-4-8v4"/>',
@@ -43,8 +45,9 @@ const app = document.querySelector('#app');
 const dialog = document.querySelector('#dialog');
 let workspace = createInitialState();
 let backend = false;
-let demo = new URLSearchParams(location.search).has('demo');
-let view = 'seats';
+const urlParams = new URLSearchParams(location.search);
+let demo = urlParams.has('demo');
+let view = ['seats', 'preferences', 'results'].includes(urlParams.get('view')) ? urlParams.get('view') : 'seats';
 let currentId = readStorage(storageKeys.person, 'data-1');
 let drafts = readStorage(storageKeys.drafts, {});
 if (!drafts || typeof drafts !== 'object' || Array.isArray(drafts)) drafts = {};
@@ -60,6 +63,9 @@ let rosterDraft = [];
 let syncing = false;
 let actionPending = false;
 let workspaceRevision = 0;
+let sheetText = '';
+let sheetPreview = null;
+let importReadRevision = 0;
 
 function readStorage(key, fallback) {
   try { const value = localStorage.getItem(key); return value === null ? fallback : JSON.parse(value); } catch { return fallback; }
@@ -121,7 +127,7 @@ function render() {
         <button class="nav-button" data-action="export-workspace">${icon('download')}<span class="nav-text">워크스페이스 백업</span></button>
       </nav>
       <div class="sidebar-spacer"></div>
-      <div class="sidebar-note"><span class="note-icon">${icon('leaf')}</span><strong>좋은 동료 곁에,<br>나에게 맞는 자리.</strong><p>선호를 담아 공정하게.<br>우리의 다음 자리를 함께 정해요.</p><button data-action="enter-demo">미리 체험하기 ${icon('arrow')}</button></div>
+      <div class="sidebar-note"><span class="note-icon">${icon('leaf')}</span><strong>좋은 동료 곁에,<br>나에게 맞는 자리.</strong><p>선호를 담아 공정하게.<br>우리의 다음 자리를 함께 정해요.</p><button data-action="enter-demo">미리 체험하기 ${icon('arrow')}</button><button class="random-demo-link" data-action="enter-random-demo">랜덤 배정 결과 보기 ${icon('arrow')}</button></div>
       <div class="sidebar-footer"><span class="avatar">J</span><span>함께 만드는 워크스페이스</span></div>
     </aside>
     <div class="main-shell">
@@ -138,7 +144,7 @@ function render() {
         ${participantsCard(isResult && !!result)}
         <footer class="page-footer"><span><span class="footer-brand">자리</span> &nbsp; 좋은 자리에서, 더 좋은 팀으로.</span><button data-action="guide">선호와 가까움을 함께 고려해요 ${icon('arrow')}</button></footer>
       </main>
-    </div><input class="sr-only" type="file" id="import-file" accept=".json,application/json" aria-label="선호 JSON 파일 불러오기"/>`;
+    </div><input class="sr-only" type="file" id="import-file" accept=".json,.csv,.tsv,.txt,application/json,text/csv,text/tab-separated-values,text/plain" aria-label="선호 JSON CSV TSV 파일 불러오기"/>`;
   const scene = app.querySelector('.floor-scene');
   if (scene) scene.style.transform = `scale(${zoom / 100})`;
 }
@@ -193,7 +199,7 @@ function participantRows(showResults) {
   }).join('') || '<tr><td colspan="5" class="table-empty">검색 결과가 없습니다.</td></tr>';
 }
 function participantsCard(showResults) {
-  return `<section class="card participants-card" aria-labelledby="participants-title"><div class="card-header participants-header"><div><div class="card-heading"><h2 id="participants-title">${showResults ? '모두의 배정 결과' : '함께하는 사람들'}</h2><span class="count-pill">${workspace.participants.length}명</span></div><p class="card-kicker">${showResults ? '파트별 배정과 개인별 지망 순위를 확인해요.' : `모든 참여자가 선호를 입력하면 배정을 시작할 수 있어요. 빈자리 ${SEATS.length - workspace.participants.length}석`}</p></div><div class="participants-tools"><button class="btn" data-action="import">${icon('upload')}파일 불러오기</button><button class="btn" data-action="${showResults ? 'download-csv' : 'export-workspace'}">${icon('download')}${showResults ? 'CSV 내보내기' : '내보내기'}</button></div></div><div class="participants-toolbar"><div class="filters">${[['all', '전체'], ...Object.entries(PARTS).map(([id, p]) => [id, p.label])].map(([id, label]) => `<button class="filter ${filter === id ? 'active' : ''}" data-action="filter" data-part="${id}">${id !== 'all' ? `<span class="part-dot ${id}"></span>` : ''}${label}<span>${id === 'all' ? workspace.participants.length : workspace.participants.filter(p => p.part === id).length}</span></button>`).join('')}</div><label class="search-field">${icon('search')}<input id="person-search" type="search" value="${esc(search)}" placeholder="이름 검색" aria-label="참여자 이름 검색"/></label></div><div class="table-scroll"><table><thead><tr><th scope="col">참여자</th><th scope="col">소속 파트</th><th scope="col">${showResults ? '배정 지망' : '입력 상태'}</th><th scope="col">${showResults ? '배정 좌석' : '1지망 좌석'}</th><th scope="col">${showResults ? '결과' : '선호 관리'}</th></tr></thead><tbody id="participant-rows">${participantRows(showResults)}</tbody></table></div><div class="table-footer"><span>이미지 기준 명단 · 초록색 인원 제외</span><span>${showResults ? `<strong>${workspace.result.metrics.matchedCount}명 배정 완료</strong>` : `<strong>${submittedCount()}명</strong> / ${workspace.participants.length}명 입력 완료`}</span></div></section>`;
+  return `<section class="card participants-card" aria-labelledby="participants-title"><div class="card-header participants-header"><div><div class="card-heading"><h2 id="participants-title">${showResults ? '모두의 배정 결과' : '함께하는 사람들'}</h2><span class="count-pill">${workspace.participants.length}명</span></div><p class="card-kicker">${showResults ? '파트별 배정과 개인별 지망 순위를 확인해요.' : `모든 참여자가 선호를 입력하면 배정을 시작할 수 있어요. 빈자리 ${SEATS.length - workspace.participants.length}석`}</p></div><div class="participants-tools"><button class="btn" data-action="import">${icon('upload')}표·파일 가져오기</button><button class="btn" data-action="sheet-template">${icon('list')}입력 양식</button><button class="btn" data-action="${showResults ? 'download-csv' : 'export-workspace'}">${icon('download')}${showResults ? 'CSV 내보내기' : '내보내기'}</button></div></div><div class="participants-toolbar"><div class="filters">${[['all', '전체'], ...Object.entries(PARTS).map(([id, p]) => [id, p.label])].map(([id, label]) => `<button class="filter ${filter === id ? 'active' : ''}" data-action="filter" data-part="${id}">${id !== 'all' ? `<span class="part-dot ${id}"></span>` : ''}${label}<span>${id === 'all' ? workspace.participants.length : workspace.participants.filter(p => p.part === id).length}</span></button>`).join('')}</div><label class="search-field">${icon('search')}<input id="person-search" type="search" value="${esc(search)}" placeholder="이름 검색" aria-label="참여자 이름 검색"/></label></div><div class="table-scroll"><table><thead><tr><th scope="col">참여자</th><th scope="col">소속 파트</th><th scope="col">${showResults ? '배정 지망' : '입력 상태'}</th><th scope="col">${showResults ? '배정 좌석' : '1지망 좌석'}</th><th scope="col">${showResults ? '결과' : '선호 관리'}</th></tr></thead><tbody id="participant-rows">${participantRows(showResults)}</tbody></table></div><div class="table-footer"><span>이미지 기준 명단 · 초록색 인원 제외</span><span>${showResults ? `<strong>${workspace.result.metrics.matchedCount}명 배정 완료</strong>` : `<strong>${submittedCount()}명</strong> / ${workspace.participants.length}명 입력 완료`}</span></div></section>`;
 }
 function resultStats() {
   const m = workspace.result.metrics;
@@ -237,10 +243,10 @@ function drawSettings() {
   if (!allSubmitted()) { toast(`아직 ${workspace.participants.length - submittedCount()}명의 선호가 필요합니다.`); return; }
   openDialog({ title: '우리의 자리를 정해볼까요?', subtitle: '저장된 선호로 배정합니다. 같은 시드로 결과를 재현할 수 있어요.', body: `<div class="draw-summary"><span>참여자 <strong>${workspace.participants.length}명</strong></span><span>선호 입력 <strong>${submittedCount()}명 완료</strong></span><span>빈자리 <strong>${21 - workspace.participants.length}석</strong></span></div><div class="setting-field"><label class="field-label" for="draw-seed">추첨 시드</label><input class="input" id="draw-seed" value="${esc(workspace.result?.seed || 'jari-2026-13F')}" maxlength="64"/><small>동률일 때의 우선순위를 정합니다. 시드를 기록해 두면 동일한 배정을 재현할 수 있어요.</small></div><div class="setting-field"><span class="field-label">배정 기준</span><div class="setting-options"><label class="setting-option"><input type="radio" name="draw-mode" value="distance" checked/><div><strong>파트가 가까워지는 배정</strong><p>개인 지망으로 안정 매칭을 만든 뒤, 같은 파트의 거리 합이 가장 작은 후보를 선택해요.</p></div></label><label class="setting-option"><input type="radio" name="draw-mode" value="preference"/><div><strong>개인 선호 기준 배정</strong><p>파트 거리 우선순위 없이, 시드로 좌석 측 우선순위를 정해 안정 매칭합니다.</p></div></label></div></div><p class="form-error" id="draw-error" role="alert"></p>`, footer: '<button class="btn" data-action="close-dialog">돌아가기</button><button class="btn btn-primary" data-action="run-draw">배정 시작하기</button>' });
 }
-async function runDraw() {
-  const seed = document.querySelector('#draw-seed').value.trim();
+async function runDraw(options = null) {
+  const seed = options?.seed || document.querySelector('#draw-seed').value.trim();
   if (!seed) { document.querySelector('#draw-error').textContent = '추첨 시드를 입력해 주세요.'; return; }
-  const mode = document.querySelector('input[name="draw-mode"]:checked').value;
+  const mode = options?.mode || document.querySelector('input[name="draw-mode"]:checked').value;
   const snapshot = structuredClone(workspace);
   const fingerprint = stateFingerprint(snapshot);
   const validation = validatePreferences(snapshot.participants, SEATS, snapshot.preferences);
@@ -373,12 +379,40 @@ function downloadCsv() {
   downloadFile(`자리-배정결과${demo ? '-예시' : ''}.csv`, '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n'), 'text/csv;charset=utf-8');
   toast('Excel에서 열 수 있는 배정 결과를 내려받았어요.');
 }
+function downloadSheetTemplate() {
+  downloadFile('자리-선호-입력양식.csv', createSheetTemplate(workspace.participants, { includeBom: true }), 'text/csv;charset=utf-8');
+  toast('Google Sheets에서 파일 가져오기로 열고 1~21지망을 작성해 주세요.');
+}
+function sheetInputDialog(text = '', filename = '') {
+  sheetText = text;
+  sheetPreview = null;
+  pendingImport = null;
+  openDialog({ title: 'Google Sheets 표 가져오기', subtitle: filename ? esc(filename) : '머리글을 포함한 표를 복사해 붙여넣거나 CSV·TSV 파일을 선택하세요.', wide: true, body: `<div class="sheet-tools"><button class="btn" data-action="sheet-template">${icon('download')}빈 양식 다운로드</button><button class="btn" data-action="pick-import-file">${icon('upload')}CSV · TSV · JSON 파일 선택</button><button class="btn btn-quiet" data-action="fill-random-sheet">${icon('sparkle')}랜덤 예시 채우기</button>${submittedCount() ? '<button class="btn btn-quiet" data-action="export-sheet">제출 선호 CSV</button>' : ''}</div><label class="field-label" for="sheet-input">이름 / 파트 / 1지망 … 21지망</label><textarea class="sheet-textarea" id="sheet-input" rows="7" spellcheck="false" placeholder="Google Sheets에서 머리글과 작성한 행을 함께 복사해 붙여넣어 주세요.">${esc(sheetText)}</textarea><p class="sheet-help">이름은 참여자 명단과 동일하게, 파트는 데이터·배차·맵, 좌석은 번호만 입력해 주세요. 예: 68, 207, 85</p><button class="btn btn-soft" data-action="preview-sheet">${icon('checkcircle')}표 확인하기</button><div id="sheet-preview" aria-live="polite"></div><p class="form-error" id="import-error" role="alert"></p>`, footer: '<button class="btn" data-action="close-dialog">취소</button><button class="btn btn-primary" data-action="apply-sheet" disabled>검증한 선호 가져오기</button>' });
+}
+function previewSheet() {
+  sheetText = document.querySelector('#sheet-input').value;
+  sheetPreview = parsePreferenceSheet(sheetText, { participants: workspace.participants, seats: SEATS });
+  const invalidRows = new Set(sheetPreview.errors.map(error => error.row));
+  const summary = sheetPreview.valid ? `<p class="sheet-success">${icon('checkcircle')} ${sheetPreview.rows.length}명 · 모든 21개 지망을 확인했습니다.</p>` : `<div class="sheet-errors"><strong>표에서 ${sheetPreview.errors.length}개 오류를 확인했습니다.</strong><ul>${sheetPreview.errors.slice(0, 8).map(error => `<li>${error.row}행 ${error.column}열: ${esc(error.message)}</li>`).join('')}</ul>${sheetPreview.errors.length > 8 ? `<p>나머지 ${sheetPreview.errors.length - 8}개 오류도 표를 수정한 후 다시 확인해 주세요.</p>` : ''}</div>`;
+  const table = sheetPreview.rows.length ? `<div class="sheet-table-scroll"><table class="sheet-preview-table"><thead><tr><th scope="col">행</th>${SHEET_HEADERS.map(header => `<th scope="col">${header}</th>`).join('')}</tr></thead><tbody>${sheetPreview.rows.map(row => `<tr class="${invalidRows.has(row.row) ? 'sheet-invalid-row' : ''}"><td>${row.row}</td><td>${esc(row.name)}</td><td>${esc(row.part ? PARTS[row.part].label : row.inputPart)}</td>${row.ranking.map(id => `<td>${esc(id)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : '';
+  document.querySelector('#sheet-preview').innerHTML = summary + table + (sheetPreview.valid ? '<p class="sheet-help">가져오면 해당 참여자의 제출 선호가 갱신되고 기존 배정 결과는 해제됩니다.</p>' : '');
+  document.querySelector('[data-action="apply-sheet"]').disabled = !sheetPreview.valid;
+}
+
 let pendingImport = null;
 async function prepareImport(file) {
-  if (!file) return;
+  if (!file || actionPending) return;
+  const revision = ++importReadRevision;
   try {
-    if (file.size > 1024 * 1024) throw new Error('1MB 이하의 JSON 선호 파일을 선택해 주세요.');
-    const parsed = JSON.parse(await file.text());
+    if (file.size > 1024 * 1024) throw new Error('1MB 이하의 JSON, CSV 또는 TSV 파일을 선택해 주세요.');
+    const text = await file.text();
+    if (revision !== importReadRevision || actionPending) return;
+    if (!/\.json$/i.test(file.name) && !text.trimStart().startsWith('{')) {
+      sheetInputDialog(text, file.name);
+      previewSheet();
+      return;
+    }
+    const parsed = JSON.parse(text);
     const participants = parsed.participants || workspace.participants;
     validateRoster(participants);
     validateSubset(participants, parsed.preferences);
@@ -387,6 +421,7 @@ async function prepareImport(file) {
     openDialog({ title: '선호 파일 불러오기', subtitle: esc(file.name), body: `<p><strong>${count}명</strong>의 21개 선호를 확인했습니다.</p>${parsed.participants ? `<p>파일의 참여자 명단 <strong>${participants.length}명</strong>을 적용합니다.</p>` : '<p>현재 명단에 해당하는 참여자의 선호를 합칩니다.</p>'}<div class="dialog-note">같은 참여자의 기존 선호는 파일에 담긴 선호로 갱신됩니다. 기존 배정 결과는 해제되며 새로 배정할 수 있습니다. 전체 백업 파일을 불러오는 경우에도 결과는 최신 선호로 다시 계산합니다.</div><p class="form-error" id="import-error" role="alert"></p>`, footer: '<button class="btn" data-action="close-dialog">취소</button><button class="btn btn-primary" data-action="apply-import">파일 적용하기</button>' });
   } catch (error) { toast(error instanceof SyntaxError ? 'JSON 파일을 읽을 수 없습니다. 자리에서 내보낸 선호 파일을 선택해 주세요.' : error.message, true); }
 }
+
 async function applyImport() {
   if (actionPending || !pendingImport) return;
   actionPending = true;
@@ -452,6 +487,7 @@ function exitDemo() { location.assign(location.pathname); }
 async function handleAction(button) {
   if (busy && button.dataset.action !== 'close-dialog') return;
   const action = button.dataset.action;
+  if (actionPending && ['close-dialog', 'import', 'apply-import', 'apply-sheet', 'preview-sheet', 'fill-random-sheet', 'pick-import-file'].includes(action)) return;
   switch (action) {
     case 'navigate': navigate(button.dataset.view); break;
     case 'guide': guideDialog(); break;
@@ -508,7 +544,17 @@ async function handleAction(button) {
     }
     case 'remove-person': rosterDraft.splice(Number(button.dataset.index), 1); document.querySelector('#roster-list').innerHTML = rosterRows(); document.querySelector('#roster-count').textContent = `(${rosterDraft.length}/21)`; break;
     case 'save-roster': await saveRoster(); break;
-    case 'import': app.querySelector('#import-file').click(); break;
+    case 'import': sheetInputDialog(); break;
+    case 'pick-import-file': app.querySelector('#import-file').value = ''; app.querySelector('#import-file').click(); break;
+    case 'sheet-template': downloadSheetTemplate(); break;
+    case 'export-sheet': downloadFile('자리-제출선호.csv', serializePreferenceSheet(workspace.participants, workspace.preferences, { includeBom: true }), 'text/csv;charset=utf-8'); break;
+    case 'preview-sheet': previewSheet(); break;
+    case 'fill-random-sheet': {
+      sheetText = serializePreferenceSheet(workspace.participants, createRandomPreferences(workspace.participants, SEATS, `sheet-random-${Date.now()}`), { delimiter: '\t' });
+      document.querySelector('#sheet-input').value = sheetText; previewSheet(); break;
+    }
+    case 'apply-sheet': if (sheetPreview?.valid) { pendingImport = { preferences: sheetPreview.preferences }; await applyImport(); } break;
+    case 'enter-random-demo': location.assign(`${location.pathname}?demo=1&random=1&seed=${encodeURIComponent(DEFAULT_RANDOM_SEED)}&view=results`); break;
     case 'apply-import': await applyImport(); break;
   }
 }
@@ -531,6 +577,7 @@ app.addEventListener('input', event => {
   if (event.target.id === 'person-search') { search = event.target.value; document.querySelector('#participant-rows').innerHTML = participantRows(view === 'results' && !!workspace.result); }
 });
 dialog.addEventListener('input', event => {
+  if (event.target.id === 'sheet-input') { sheetText = event.target.value; sheetPreview = null; document.querySelector('[data-action="apply-sheet"]').disabled = true; document.querySelector('#sheet-preview').innerHTML = ''; }
   const row = event.target.closest('[data-roster-index]');
   if (row && event.target.dataset.field) rosterDraft[Number(row.dataset.rosterIndex)][event.target.dataset.field] = event.target.value;
 });
@@ -568,7 +615,7 @@ async function syncWorkspace(force = false) {
 }
 async function init() {
   app.innerHTML = '<div class="boot-screen"><span class="spinner" aria-hidden="true"></span><p>우리의 자리를 준비하고 있어요.</p></div>';
-  if (demo) { workspace.preferences = createDemoPreferences(workspace.participants); drafts = {}; }
+  if (demo) { workspace.preferences = urlParams.has('random') ? createRandomPreferences(workspace.participants, SEATS, urlParams.get('seed') || DEFAULT_RANDOM_SEED) : createDemoPreferences(workspace.participants); drafts = {}; }
   else {
     try {
       const response = await fetch('/api/state', { signal: AbortSignal.timeout(4500) });
@@ -590,6 +637,7 @@ async function init() {
   }
   if (!workspace.participants.some(p => p.id === currentId)) currentId = workspace.participants[0].id;
   render();
+  if (demo && urlParams.has('random') && view === 'results') await runDraw({ seed: urlParams.get('seed') || DEFAULT_RANDOM_SEED, mode: 'distance' });
   setInterval(() => syncWorkspace(), 12000);
 }
 init().catch(error => { app.innerHTML = `<div class="boot-screen"><p>${esc(error.message)}</p><button class="btn" onclick="location.reload()">다시 열기</button></div>`; });

@@ -9,7 +9,7 @@ import { findBlockingPairs } from './matching.mjs';
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const MAX_BODY = 1024 * 1024;
 const seatIds = new Set(SEATS.map(seat => seat.id));
-const publicFiles = new Set(['index.html', 'app.mjs', 'styles.css', 'data.mjs', 'matching.mjs', 'allocation-worker.mjs']);
+const publicFiles = new Set(['index.html', 'app.mjs', 'styles.css', 'data.mjs', 'matching.mjs', 'allocation-worker.mjs', 'sheet-input.mjs', 'random-preferences.mjs']);
 const mime = { '.html': 'text/html; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.svg': 'image/svg+xml', '.webp': 'image/webp', '.ico': 'image/x-icon' };
 class ApiError extends Error {
   constructor(status, message) { super(message); this.status = status; }

@@ -5,6 +5,8 @@ import path from 'node:path';
 import { createServer } from '../server.mjs';
 import { INITIAL_PARTICIPANTS, SEATS, createDemoPreferences } from '../data.mjs';
 import { findBlockingPairs } from '../matching.mjs';
+import { createRandomPreferences } from '../random-preferences.mjs';
+import { createSheetTemplate, parsePreferenceSheet, serializePreferenceSheet } from '../sheet-input.mjs';
 
 // Playwright is a test tool supplied by the operator, not an app dependency.
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
@@ -129,6 +131,47 @@ try {
     assert.equal(await page.locator('.submitted-status').count(), 20);
     assert.equal(Object.keys((await state()).preferences).length, 20);
   });
+  await check('Google Sheets template downloads 23 columns with the current 20-person roster', async () => {
+    const template = await download(page, 'sheet-template');
+    assert.equal(template.content.replace(/^\uFEFF/, '').split('\r\n')[0].split(',').length, 23);
+    assert.equal(parsePreferenceSheet(template.content).rows.length, 20);
+  });
+  await check('Sheets paste validates all rows and invalid input never modifies saved preferences', async () => {
+    const input = createRandomPreferences(INITIAL_PARTICIPANTS, SEATS, 'browser-sheets-paste');
+    const valid = serializePreferenceSheet(INITIAL_PARTICIPANTS, input, { delimiter: '\t' });
+    const before = await state();
+    await action(page, 'import').click();
+    await page.locator('#sheet-input').fill(valid);
+    await action(page, 'preview-sheet').click();
+    assert.equal(await page.locator('.sheet-preview-table tbody tr').count(), 20);
+    assert.equal(await action(page, 'apply-sheet').isEnabled(), true);
+    const lines = valid.split('\r\n');
+    const cells = lines[1].split('\t');
+    cells[23 - 1] = cells[2];
+    lines[1] = cells.join('\t');
+    await page.locator('#sheet-input').fill(lines.join('\r\n'));
+    assert.equal(await action(page, 'apply-sheet').isDisabled(), true);
+    await action(page, 'preview-sheet').click();
+    assert.match(await page.locator('.sheet-errors').textContent(), /중복/);
+    assert.deepEqual((await state()).preferences, before.preferences);
+    await page.locator('#sheet-input').fill(valid);
+    await action(page, 'preview-sheet').click();
+    const applied = page.waitForResponse(r => r.url().endsWith('/api/import') && r.request().method() === 'POST');
+    await action(page, 'apply-sheet').click();
+    assert.equal((await applied).status(), 200);
+    await page.locator('#dialog[open]').waitFor({ state: 'hidden' });
+    assert.deepEqual((await state()).preferences, input);
+  });
+  await check('UTF8 CSV file upload imports the same validated Google Sheets rows', async () => {
+    const input = createRandomPreferences(INITIAL_PARTICIPANTS, SEATS, 'browser-sheets-csv');
+    await page.locator('#import-file').setInputFiles({ name: 'google-sheets.csv', mimeType: 'text/csv', buffer: Buffer.from(serializePreferenceSheet(INITIAL_PARTICIPANTS, input, { includeBom: true })) });
+    await page.locator('.sheet-success').waitFor();
+    const applied = page.waitForResponse(r => r.url().endsWith('/api/import') && r.request().method() === 'POST');
+    await action(page, 'apply-sheet').click();
+    assert.equal((await applied).status(), 200);
+    await page.locator('#dialog[open]').waitFor({ state: 'hidden' });
+    assert.deepEqual((await state()).preferences, input);
+  });
   await check('delayed polling GET cannot regress a subsequent preference save', async () => {
     await page.clock.install();
     let release, intercepted;
@@ -194,6 +237,17 @@ try {
     assert.deepEqual(await state(), before);
     await demo.close();
   });
+  await check('random demo opens a reproducible allocation immediately without changing the workspace', async () => {
+    const before = await state();
+    const random = await context.newPage();
+    monitor(random);
+    await random.goto(`${base}/?demo=1&random=1&view=results`);
+    await random.locator('.result-panel').waitFor();
+    assert.match(await random.locator('.content').textContent(), /14/);
+    assert.equal(await random.locator('.floor-card [data-action="seat"]').count(), 21);
+    assert.deepEqual(await state(), before);
+    await random.close();
+  });
   await check('390px mobile has no page overflow and all 21 seats fit the scrollable map', async () => {
     const mobileContext = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, deviceScaleFactor: 1 });
     const mobile = await mobileContext.newPage();
@@ -213,6 +267,12 @@ try {
     assert.ok(geometry.pageWidth <= geometry.viewport, JSON.stringify(geometry));
     assert.equal(geometry.seatsContained, true, JSON.stringify(geometry));
     await mobile.screenshot({ path: path.join(artifacts, 'browser-mobile-seats.png'), fullPage: true });
+    await action(mobile, 'import').click();
+    await mobile.locator('#sheet-input').fill(serializePreferenceSheet(INITIAL_PARTICIPANTS, createRandomPreferences(), { delimiter: '\t' }));
+    await action(mobile, 'preview-sheet').click();
+    assert.equal(await mobile.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await mobile.screenshot({ path: path.join(artifacts, 'browser-mobile-sheet-input.png') });
+    await mobile.keyboard.press('Escape');
     await mobileContext.close();
   });
   assert.deepEqual(errors, [], 'Browser JavaScript errors');

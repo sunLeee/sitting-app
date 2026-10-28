@@ -40,6 +40,40 @@ npm start -- --host 0.0.0.0 --port 5180
 
 **미리 체험하기** 또는 `http://localhost:5180/?demo=1`은 예시 선호로 동작합니다. 예시 화면의 저장·배정·명단 수정은 실제 워크스페이스에 반영되지 않습니다.
 
+## Google Sheets 표로 입력하기
+
+**함께하는 사람들 → 표·파일 가져오기**에서 Google Sheets 표를 붙여넣거나 CSV/TSV 파일을 업로드할 수 있습니다.
+
+1. **입력 양식** 또는 대화상자의 **빈 양식 다운로드**로 CSV를 받습니다.
+2. Google Sheets에서 **파일 → 가져오기 → 업로드**로 CSV를 엽니다. A열은 이름, B열은 파트, C~W열은 1~21지망입니다.
+3. 각 사람의 행에 21개 좌석 번호를 중복 없이 입력합니다. 이름은 명단과 같게, 파트는 `데이터`, `배차`, `맵`, 좌석은 `68`, `207`, `85`처럼 번호만 씁니다.
+4. 머리글과 작성한 행을 함께 복사해 **표·파일 가져오기**에 붙여넣습니다. 또는 **파일 → 다운로드 → 쉼표로 구분된 값(.csv)**으로 저장해서 업로드합니다.
+5. **표 확인하기**로 미리보기와 오류 위치를 확인한 뒤 **검증한 선호 가져오기**를 누릅니다. 한 행이라도 잘못된 입력이 있으면 전체 가져오기를 보류합니다.
+
+이름·파트·21개 지망 머리글의 순서는 바꿀 수 있고 추가 메모 열도 허용합니다. 일부 사람의 완성된 행만 가져와 기존 제출 내용과 합칠 수도 있습니다. 이름 또는 파트를 바꿔야 하면 **참여자 관리**에서 먼저 수정하세요. 기존 JSON 파일 가져오기도 계속 지원합니다.
+
+빈 양식은 현재 명단을 반영합니다. 대화상자의 **제출 선호 CSV**로 이미 저장한 선호를 Google Sheets 형식으로 내보낼 수도 있습니다.
+
+## 랜덤 데이터와 실제 배정 예시
+
+```bash
+npm run sample
+npm run sample -- --seed my-seed
+```
+
+명단의 20명에게 서로 다른 랜덤 21지망을 생성하고 배정한 뒤 `examples/`에 다음 파일을 만듭니다. 동일한 시드로 입력과 배정 결과를 재현할 수 있습니다.
+
+- [Google Sheets용 빈 입력 양식](examples/preference-template.csv), [랜덤 입력 CSV](examples/random-preferences.csv)
+- [붙여넣기용 랜덤 입력 TSV](examples/random-preferences.tsv)
+- [가져오기용 랜덤 입력 JSON](examples/random-preferences.json)
+- [전체 배정 결과](examples/random-result.md), [결과 CSV](examples/random-result.csv), [재현용 JSON](examples/random-result.json)
+
+기본 시드 `jari-random-2026-10-28`의 결과: **20명 배정, 빈자리 B구역 82번, 평균 3지망, 3지망 이내 14명**입니다. 파트 거리 합은 개인 선호 기준 배정 대비 **37.9% 감소**했습니다. 개인 선호 기준 평균 지망은 2.75, 거리 고려 배정의 평균 지망은 3.00입니다.
+
+명령은 예시 파일을 생성합니다. 생성한 파일을 앱의 **표·파일 가져오기**로 적용한 뒤 배정하면 실제 워크스페이스에서도 같은 결과를 볼 수 있습니다. 이번 검증에서는 비어 있던 로컬 워크스페이스에 예시 선호와 결과를 적용했고, 적용 전 상태는 `.local-data/backups/`에 보관했습니다.
+
+화면의 **랜덤 배정 결과 보기**는 실제 제출 내역을 바꾸지 않고 랜덤 예시를 바로 배정합니다. 직접 접속할 때는 `http://localhost:5180/?demo=1&random=1&view=results`를 사용할 수 있습니다.
+
 ## 좌석과 참여자
 
 구역과 파트의 색상은 서로 다른 구분입니다.
@@ -115,6 +149,8 @@ PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs npm run test:browser
 | --- | --- |
 | `index.html`, `styles.css`, `app.mjs` | 화면과 좌석·선호·명단·파일·결과 흐름 |
 | `data.mjs` | 21개 좌석, 파트, 초기 명단, 예시 데이터 |
+| `sheet-input.mjs` | Google Sheets CSV/TSV 파싱, 입력 검증, 양식·표 내보내기 |
+| `random-preferences.mjs`, `scripts/sample.mjs` | 시드 기반 랜덤 입력과 실제 예시 배정 생성 |
 | `matching.mjs` | 선호 검증, 게일–섀플리, 거리 후보 탐색, 안정성 검증 |
 | `allocation-worker.mjs` | 화면과 분리된 배정 계산 |
 | `server.mjs` | HTTP API, 입력 검증, 원자적 파일 저장 |
