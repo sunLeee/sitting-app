@@ -17,6 +17,8 @@ export const SEATS = [
   ...[['85', '90'], ['86', '89'], ['87', '88']].flatMap((row, y) => row.map((id, x) => ({ id, zone: 'C', x, y: y + 7 }))),
 ];
 
+export const C_SEAT_PAIRS = [['85', '90'], ['86', '89'], ['87', '88']];
+
 const names = {
   data: ['노현구', '소민걸', '하회원', '왕정갑', '김장우', '남선우', '황시정', '김태석'],
   dispatch: ['유건우', '김병훈', '전윤혁', '임홍규', '부정준', '허자윤', '이영호', '이태양'],
@@ -26,11 +28,11 @@ const names = {
 export const INITIAL_PARTICIPANTS = Object.entries(names).flatMap(([part, members]) => members.map((name, index) => ({ id: `${part}-${index + 1}`, name, part })));
 
 export function createInitialState() {
-  return { version: 1, participants: structuredClone(INITIAL_PARTICIPANTS), preferences: {}, result: null, updatedAt: null };
+  return { version: 1, participants: structuredClone(INITIAL_PARTICIPANTS), preferences: {}, companions: {}, result: null, updatedAt: null };
 }
 
 export function stateFingerprint(state) {
-  return JSON.stringify({ participants: state.participants.map(p => ({ id: p.id, name: p.name, part: p.part })).sort((a, b) => a.id.localeCompare(b.id)), preferences: Object.fromEntries(Object.entries(state.preferences).sort(([a], [b]) => a.localeCompare(b))) });
+  return JSON.stringify({ participants: state.participants.map(p => ({ id: p.id, name: p.name, part: p.part })).sort((a, b) => a.id.localeCompare(b.id)), preferences: Object.fromEntries(Object.entries(state.preferences).sort(([a], [b]) => a.localeCompare(b))), companions: Object.fromEntries(Object.entries(state.companions ?? {}).filter(([, id]) => id !== null && id !== '').sort(([a], [b]) => a.localeCompare(b))) });
 }
 
 export function createDemoPreferences(participants = INITIAL_PARTICIPANTS) {

@@ -17,6 +17,9 @@ test('20 people occupy unique seats, with one vacancy and no blocking pairs', ()
   assert.equal(new Set(result.assignments.map((entry) => entry.seatId)).size, 20);
   assert.equal(result.metrics.vacancies, 1);
   assert.equal(result.metrics.candidateCount, 7981);
+  assert.equal(result.metrics.companionRequested, 0);
+  assert.equal(result.metrics.companionSatisfied, 0);
+  assert.deepEqual(result.companionPlan, []);
   assert.deepEqual(findBlockingPairs(input.participants, input.seats, input.preferences, result.seatPriorities, result.assignments), []);
   assert.deepEqual(progress.at(-1), { completed: 7981, total: 7981 });
   assert.ok(progress.length > 1);

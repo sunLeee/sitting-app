@@ -1,9 +1,12 @@
 import { INITIAL_PARTICIPANTS, PARTS, SEATS } from './data.mjs';
 import { validatePreferences } from './matching.mjs';
+import { normalizeCompanions } from './companion.mjs';
 
 const headersFor = seats => ['이름', '파트', ...seats.map((_, i) => `${i + 1}지망`)];
-export const SHEET_HEADERS = headersFor(SEATS);
+export const COMPANION_HEADER = '함께 앉고 싶은 동료';
+export const SHEET_HEADERS = [...headersFor(SEATS), COMPANION_HEADER];
 const normalizeHeader = value => value.trim().replace(/\s+/g, '');
+const companionAliases = new Set([COMPANION_HEADER, 'C구역희망동료', '동료선호'].map(normalizeHeader));
 const partAliases = new Map(Object.entries(PARTS).flatMap(([id, part]) => [id, part.label, part.fullLabel].map(label => [label.replace(/\s+/g, '').toLowerCase(), id])));
 
 function detectDelimiter(text) {
@@ -55,7 +58,7 @@ function readTable(text, delimiter) {
 }
 
 export function parsePreferenceSheet(text, { participants = INITIAL_PARTICIPANTS, seats = SEATS, delimiter = 'auto' } = {}) {
-  const output = { valid: false, errors: [], preferences: {}, rows: [], delimiter: ',' };
+  const output = { valid: false, errors: [], preferences: {}, companions: {}, rows: [], delimiter: ',' };
   const fail = (row, column, message) => output.errors.push({ row, column, message });
   if (typeof text !== 'string' || !text.trim()) { fail(1, 1, '머리글을 포함한 Google Sheets 표를 붙여넣어 주세요.'); return output; }
   if (new TextEncoder().encode(text).length > 1024 * 1024) { fail(1, 1, '표는 1MB 이하로 입력해 주세요.'); return output; }
@@ -76,6 +79,9 @@ export function parsePreferenceSheet(text, { participants = INITIAL_PARTICIPANTS
     else if (positions.length > 1) fail(1, positions[1] + 1, `'${label}' 머리글이 중복됐습니다.`);
     else indices.set(label, positions[0]);
   }
+  const companionPositions = header.flatMap((cell, i) => companionAliases.has(cell) ? [i] : []);
+  if (companionPositions.length > 1) fail(1, companionPositions[1] + 1, `'${COMPANION_HEADER}' 머리글이 중복됐습니다.`);
+  const companionIndex = companionPositions[0];
   if (output.errors.length) return output;
   if (table.slice(1).filter(row => row.some(cell => cell.trim())).length > participants.length) {
     fail(participants.length + 2, 1, `현재 명단 ${participants.length}명보다 입력 행이 많습니다. 참여자 관리와 표의 중복 행을 확인해 주세요.`);
@@ -89,6 +95,7 @@ export function parsePreferenceSheet(text, { participants = INITIAL_PARTICIPANTS
   const seatIds = new Set(seats.map(seat => seat.id));
   const seenPeople = new Set();
   const entries = [];
+  const companionEntries = [];
   for (let i = 1; i < table.length; i++) {
     const cells = table[i];
     if (cells.every(cell => !cell.trim())) continue;
@@ -100,7 +107,13 @@ export function parsePreferenceSheet(text, { participants = INITIAL_PARTICIPANTS
     const inputPart = cell('파트');
     const part = partAliases.get(inputPart.replace(/\s+/g, '').toLowerCase()) || null;
     const ranking = seats.map((_, index) => cell(`${index + 1}지망`));
-    output.rows.push({ row: rowNumber, participantId: person?.id || null, name, part, inputPart, ranking });
+    const rawCompanion = companionIndex === undefined ? '' : (cells[companionIndex] || '').trim();
+    const companion = known.get(rawCompanion) || (rawCompanion.startsWith("'") ? known.get(rawCompanion.slice(1)) : undefined);
+    const companionName = companion?.name.trim() || rawCompanion;
+    output.rows.push({ row: rowNumber, participantId: person?.id || null, name, part, inputPart, ranking, companionName, companionId: companion?.id || null });
+    if (rawCompanion && !companion) fail(rowNumber, companionIndex + 1, `${name || '참여자'}: '${rawCompanion}'는 등록되지 않은 동료입니다.`);
+    else if (companion && person?.id === companion.id) fail(rowNumber, companionIndex + 1, `${name}: 자기 자신을 희망 동료로 선택할 수 없습니다.`);
+    if (person && companionIndex !== undefined) companionEntries.push([person.id, companion?.id || null]);
     if (!name) fail(rowNumber, indices.get('이름') + 1, '이름을 입력해 주세요.');
     else if (!person) fail(rowNumber, indices.get('이름') + 1, `${name}: 등록되지 않은 이름입니다. 참여자 관리에서 먼저 추가해 주세요.`);
     else if (seenPeople.has(person.id)) fail(rowNumber, indices.get('이름') + 1, `${name}: 같은 참여자가 표에 두 번 들어 있습니다.`);
@@ -125,7 +138,10 @@ export function parsePreferenceSheet(text, { participants = INITIAL_PARTICIPANTS
     if (!validation.valid) {
       fail(1, 1, validation.errors[0]);
       output.preferences = {};
-    } else output.valid = true;
+    } else {
+      output.companions = Object.fromEntries(companionEntries);
+      output.valid = true;
+    }
   }
   return output;
 }
@@ -141,17 +157,22 @@ function writeTable(rows, delimiter, includeBom) {
   return (includeBom ? '\uFEFF' : '') + rows.map(row => row.map(quote).join(delimiter)).join('\r\n') + '\r\n';
 }
 
-export function createSheetTemplate(participants = INITIAL_PARTICIPANTS, { delimiter = ',', includeBom = false, seats = SEATS } = {}) {
-  const rows = [headersFor(seats), ...participants.map(p => [p.name, PARTS[p.part].label, ...seats.map(() => '')])];
-  return writeTable(rows, delimiter, includeBom);
+export function createSheetTemplateRows(participants = INITIAL_PARTICIPANTS, { seats = SEATS } = {}) {
+  return [[...headersFor(seats), COMPANION_HEADER], ...participants.map(p => [p.name, PARTS[p.part].label, ...seats.map(() => ''), ''])];
 }
 
-export function serializePreferenceSheet(participants, preferences, { delimiter = ',', includeBom = false, seats = SEATS } = {}) {
+export function createSheetTemplate(participants = INITIAL_PARTICIPANTS, { delimiter = ',', includeBom = false, seats = SEATS } = {}) {
+  return writeTable(createSheetTemplateRows(participants, { seats }), delimiter, includeBom);
+}
+
+export function serializePreferenceSheet(participants, preferences, { delimiter = ',', includeBom = false, seats = SEATS, companions = {} } = {}) {
+  const requests = normalizeCompanions(participants, companions);
+  const names = new Map(participants.map(person => [person.id, person.name]));
   const chosen = participants.filter(person => Object.hasOwn(preferences, person.id));
   if (Object.keys(preferences).length) {
     const validation = validatePreferences(chosen, seats, preferences);
     if (!validation.valid) throw new Error(validation.errors.join('\n'));
   }
-  const rows = [headersFor(seats), ...chosen.map(p => [p.name, PARTS[p.part].label, ...preferences[p.id]])];
+  const rows = [[...headersFor(seats), COMPANION_HEADER], ...chosen.map(p => [p.name, PARTS[p.part].label, ...preferences[p.id], names.get(requests[p.id]) || ''])];
   return writeTable(rows, delimiter, includeBom);
 }

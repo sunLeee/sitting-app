@@ -3,15 +3,17 @@ import { readFile, writeFile, mkdir, rename, rm, realpath } from 'node:fs/promis
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { createInitialState, PARTS, SEATS, stateFingerprint } from './data.mjs';
-import { findBlockingPairs } from './matching.mjs';
+import { allocateSeats, findBlockingPairs, buildMatchingPreferences, getMaxCompanionSatisfied } from './matching.mjs';
 import { allocateRandomSeats } from './random-allocation.mjs';
 import { fetchPublicPreferenceSheet } from './google-sheet.mjs';
+import { normalizeCompanions, getCompanionMetrics } from './companion.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const MAX_BODY = 1024 * 1024;
 const seatIds = new Set(SEATS.map(seat => seat.id));
-const publicFiles = new Set(['index.html', 'app.mjs', 'styles.css', 'data.mjs', 'matching.mjs', 'allocation-worker.mjs', 'sheet-input.mjs', 'random-preferences.mjs', 'random-allocation.mjs']);
+const publicFiles = new Set(['index.html', 'app.mjs', 'styles.css', 'data.mjs', 'companion.mjs', 'sheet-template-config.mjs', 'matching.mjs', 'allocation-worker.mjs', 'sheet-input.mjs', 'random-preferences.mjs', 'random-allocation.mjs']);
 const mime = { '.html': 'text/html; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.svg': 'image/svg+xml', '.webp': 'image/webp', '.ico': 'image/x-icon' };
 class ApiError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -43,6 +45,18 @@ function validatePreferences(preferences, participants) {
     return [id, validateRanking(ranking)];
   }));
 }
+function validateCompanions(companions, participants) {
+  try { return normalizeCompanions(participants, companions); }
+  catch (error) { throw new ApiError(400, error.message); }
+}
+function pruneCompanions(companions, participants) {
+  const ids = new Set(participants.map(person => person.id));
+  return Object.fromEntries(Object.entries(companions).filter(([id, target]) => ids.has(id) && ids.has(target)));
+}
+function mergeCompanions(existing, imported, participants) {
+  validateCompanions(imported, participants);
+  return validateCompanions({ ...existing, ...imported }, participants);
+}
 function validateResult(result, state) {
   requireThat(object(result) && Array.isArray(result.assignments), '유효한 배정 결과가 필요합니다.');
   requireThat(['distance', 'preference', 'random'].includes(result.mode) && (typeof result.seed === 'string' || (typeof result.seed === 'number' && Number.isFinite(result.seed))), '배정 모드 또는 추첨 시드가 올바르지 않습니다.');
@@ -72,22 +86,48 @@ function validateResult(result, state) {
       }
     }
   });
-  const expected = { totalDistance, averageDistance: pairs ? totalDistance / pairs : 0, averageRank: rankSum / people.size, top3Count, matchedCount: people.size, vacancies: SEATS.length - people.size, candidateCount: result.mode === 'distance' ? 1 + SEATS.length * (SEATS.length - 1) * (SEATS.length - 2) : 1 };
+  const expected = { totalDistance, averageDistance: pairs ? totalDistance / pairs : 0, averageRank: rankSum / people.size, top3Count, matchedCount: people.size, vacancies: SEATS.length - people.size };
   requireThat(object(result.metrics) && Object.entries(expected).every(([key, value]) => Number.isFinite(result.metrics[key]) && Math.abs(result.metrics[key] - value) <= 1e-8), '배정 통계가 실제 배정 결과와 일치하지 않습니다.');
-  requireThat(result.anchors === null || (result.mode === 'distance' && object(result.anchors) && Object.keys(PARTS).every(part => seatIds.has(result.anchors[part])) && new Set(Object.values(result.anchors)).size === 3), '파트 기준 좌석이 올바르지 않습니다.');
+  const baseCount = 1 + SEATS.length * (SEATS.length - 1) * (SEATS.length - 2);
+  const companionMetrics = getCompanionMetrics(state.participants, SEATS, state.companions, result.assignments);
+  requireThat(Number.isInteger(result.metrics.candidateCount) && result.metrics.candidateCount <= 1000000 && (companionMetrics.companionRequested > 0 ? result.metrics.candidateCount >= (result.mode === 'distance' ? baseCount : 1) : result.metrics.candidateCount === (result.mode === 'distance' ? baseCount : 1)), '배정 후보 수가 올바르지 않습니다.');
+  const metricKeys = new Set([...Object.keys(expected), 'candidateCount', ...Object.keys(companionMetrics)]);
+  requireThat(Object.keys(result.metrics).every(key => metricKeys.has(key)), '배정 통계에 알 수 없는 항목이 있습니다.');
+  const companionAware = companionMetrics.companionRequested > 0 || Object.hasOwn(result.metrics, 'companionRequested') || Object.hasOwn(result.metrics, 'companionSatisfied');
+  if (companionAware) requireThat(Object.entries(companionMetrics).every(([key, value]) => Number.isInteger(result.metrics[key]) && result.metrics[key] === value), '희망 동료 통계가 실제 배정 결과와 일치하지 않습니다.');
+  requireThat(result.anchors === null || (result.mode === 'distance' && object(result.anchors) && Object.keys(result.anchors).length === 3 && Object.keys(PARTS).every(part => seatIds.has(result.anchors[part])) && new Set(Object.values(result.anchors)).size === 3), '파트 기준 좌석이 올바르지 않습니다.');
   try {
-    requireThat(findBlockingPairs(state.participants, SEATS, state.preferences, result.seatPriorities, result.assignments).length === 0, '안정적인 게일-섀플리 배정 결과가 아닙니다.');
+    const matchingPreferences = buildMatchingPreferences(state.participants, SEATS, state.preferences, state.companions, result.companionPlan === undefined ? [] : result.companionPlan);
+    if (companionMetrics.companionRequested > 0) requireThat(companionMetrics.companionSatisfied === getMaxCompanionSatisfied(state.participants, SEATS, state.companions), '희망 동료 요청을 최대한 만족하는 배정 결과가 아닙니다.');
+    requireThat(findBlockingPairs(state.participants, SEATS, matchingPreferences, result.seatPriorities, result.assignments).length === 0, '안정적인 게일-섀플리 배정 결과가 아닙니다.');
   } catch (error) {
     if (error instanceof ApiError) throw error;
     throw new ApiError(400, '좌석 우선순위 또는 배정 결과가 올바르지 않습니다.');
   }
+  // Stability alone permits other outcomes with worse distance or submitted rank.
+  // Reproduce the selected candidate before accepting client or persisted results.
+  const selected = allocateSeats({ participants: state.participants, seats: SEATS, preferences: state.preferences, companions: state.companions, seed: result.seed, mode: result.mode });
+  const comparableMetrics = { ...result.metrics };
+  if (companionMetrics.companionRequested === 0) {
+    for (const key of ['companionRequested', 'companionSatisfied']) {
+      if (!Object.hasOwn(comparableMetrics, key)) comparableMetrics[key] = 0;
+    }
+  }
+  const comparablePlan = result.companionPlan === undefined && companionMetrics.companionRequested === 0 ? [] : result.companionPlan;
+  requireThat(isDeepStrictEqual(result.assignments, selected.assignments) &&
+    Object.keys(comparableMetrics).length === Object.keys(selected.metrics).length &&
+    Object.entries(selected.metrics).every(([key, value]) => Number.isFinite(comparableMetrics[key]) && Math.abs(comparableMetrics[key] - value) <= 1e-8) &&
+    isDeepStrictEqual(comparablePlan, selected.companionPlan) &&
+    isDeepStrictEqual(result.seatPriorities, selected.seatPriorities) &&
+    isDeepStrictEqual(result.anchors, selected.anchors), '저장된 선호, 배정 기준과 추첨 시드로 선정한 배정 결과와 일치하지 않습니다.');
   return structuredClone(result);
 }
 function validateState(value) {
   requireThat(object(value) && value.version === 1, '저장 데이터 버전이 올바르지 않습니다.');
   const participants = validateParticipants(value.participants);
   const preferences = validatePreferences(value.preferences, participants);
-  const state = { version: 1, participants, preferences, result: null, updatedAt: value.updatedAt ?? null };
+  const companions = validateCompanions(value.companions === undefined ? {} : value.companions, participants);
+  const state = { version: 1, participants, preferences, companions, result: null, updatedAt: value.updatedAt ?? null };
   requireThat(state.updatedAt === null || (typeof state.updatedAt === 'string' && Number.isFinite(Date.parse(state.updatedAt))), '저장 시간이 올바르지 않습니다.');
   if (value.result !== null && value.result !== undefined) {
     requireThat(value.result.mode === 'random' || participants.every(person => Object.hasOwn(preferences, person.id)), '저장 결과에 지망 목록이 누락되었습니다.');
@@ -146,10 +186,15 @@ export async function createServer({ dataDir = path.join(ROOT, '.local-data'), r
             const id = preferenceMatch[1];
             requireThat(next.participants.some(person => person.id === id), '참가자를 찾을 수 없습니다.', 404);
             Object.defineProperty(next.preferences, id, { value: validateRanking(body.ranking), enumerable: true, configurable: true, writable: true });
+            if (Object.hasOwn(body, 'companionId')) {
+              requireThat(body.companionId === null || typeof body.companionId === 'string', '희망 동료는 참가자 ID 또는 null로 지정해 주세요.');
+              next.companions = mergeCompanions(next.companions, { [id]: body.companionId }, next.participants);
+            }
             next.result = null;
           } else if (pathname === '/api/participants') {
             next.participants = validateParticipants(body.participants);
             next.preferences = Object.fromEntries(next.participants.filter(person => Object.hasOwn(state.preferences, person.id)).map(person => [person.id, state.preferences[person.id]]));
+            next.companions = pruneCompanions(next.companions, next.participants);
             next.result = null;
           } else if (pathname === '/api/result') {
             requireThat(body.fingerprint === stateFingerprint(state), '지망 또는 참가자가 변경되었습니다. 최신 데이터로 다시 추첨해 주세요.', 409);
@@ -160,9 +205,11 @@ export async function createServer({ dataDir = path.join(ROOT, '.local-data'), r
             if (Object.hasOwn(body, 'participants')) {
               next.participants = validateParticipants(body.participants);
               next.preferences = Object.fromEntries(next.participants.filter(person => Object.hasOwn(state.preferences, person.id)).map(person => [person.id, state.preferences[person.id]]));
+              next.companions = pruneCompanions(next.companions, next.participants);
             }
             const imported = validatePreferences(body.preferences, next.participants);
             next.preferences = { ...next.preferences, ...imported };
+            if (Object.hasOwn(body, 'companions')) next.companions = mergeCompanions(next.companions, body.companions, next.participants);
             next.result = null;
           }
           next.updatedAt = new Date().toISOString();

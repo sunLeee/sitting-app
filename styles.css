@@ -541,3 +541,16 @@ dialog.wide-dialog { width: min(980px, calc(100vw - 32px)); }
 .sheet-preview-table .sheet-invalid-row { background: #fff6f4; }
 .sidebar-note .random-demo-link { margin-top: 11px; font-weight: 500; font-size: 10px; }
 @media (max-width: 650px) { .sheet-tools .btn { font-size: 9px; } .participants-tools { flex-wrap: wrap; justify-content: flex-end; } .sheet-textarea { font-size: 11px; } .sheet-draw-options { grid-template-columns: 1fr; } .public-sheet-input { padding: 12px; } }
+
+.companion-field { margin: 18px 0; }
+.companion-field .field-label { line-height: 1.7; }
+.companion-field .field-label span { color: #95a69a; font-weight: 400; }
+.companion-field .input { font-size: 11px; padding: 9px 10px; }
+.companion-field p { margin-top: 9px; font-size: 10px; line-height: 1.8; color: #7d9183; }
+.seat-pair-note { position: absolute; top: -8px; left: 3px; padding: 0 2px; background: #f5f8f6; font-size: 7px; color: #718879; line-height: 9px; }
+.zone-group[data-zone='C'] .seat:nth-child(odd)::before { content: ''; position: absolute; top: 50%; right: -9px; width: 8px; height: 2px; background: #9baea3; pointer-events: none; }
+.zone-pairs { display: block; font-size: 8px; color: #71877a; margin: 7px 0; line-height: 1.7; }
+.companion-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.result-detail .companion-status { text-align: right; max-width: 64%; line-height: 1.6; }
+.intro-actions a.btn { text-decoration: none; }
+@media (max-width: 900px) { .companion-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

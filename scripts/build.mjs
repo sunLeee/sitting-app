@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const output = path.join(root, 'dist');
-const files = ['index.html', 'app.mjs', 'styles.css', 'data.mjs', 'matching.mjs', 'allocation-worker.mjs', 'sheet-input.mjs', 'random-preferences.mjs', 'random-allocation.mjs', 'assets'];
+const files = ['index.html', 'app.mjs', 'styles.css', 'data.mjs', 'companion.mjs', 'sheet-template-config.mjs', 'matching.mjs', 'allocation-worker.mjs', 'sheet-input.mjs', 'random-preferences.mjs', 'random-allocation.mjs', 'assets'];
 await Promise.all(files.map(file => access(path.join(root, file))));
 await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });

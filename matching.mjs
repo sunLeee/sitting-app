@@ -1,3 +1,6 @@
+import { C_SEAT_PAIRS } from './data.mjs';
+import { normalizeCompanions, getCompanionMetrics } from './companion.mjs';
+
 /**
  * Applicant-proposing Gale–Shapley seating allocation.
  * Distance mode searches distinct spatial anchors for the three parts, then
@@ -119,7 +122,7 @@ function assignmentsFor(context, result) {
   return context.people.flatMap((person, index) => result.assigned[index] < 0 ? [] : [{
     participantId: person.id,
     seatId: context.places[result.assigned[index]].id,
-    rank: result.next[index],
+    rank: context.lists[index].indexOf(result.assigned[index]) + 1,
   }]);
 }
 
@@ -189,8 +192,109 @@ function prioritiesFor(context, prefers) {
   }));
 }
 
-export function allocateSeats({ participants, seats, preferences, seed = DEFAULT_SEED, mode = 'distance', onProgress } = {}) {
+// Only complete, physical C pods can satisfy a companion request.
+function availablePods(seats) {
+  const ids = new Set(seats.filter(seat => seat.zone === 'C').map(seat => seat.id));
+  return C_SEAT_PAIRS.filter(pair => pair.every(id => ids.has(id)));
+}
+
+function maximumCompanionSets(participants, seats, companions) {
+  const requests = normalizeCompanions(participants, companions);
+  const edgesByKey = new Map();
+  for (const [a, b] of Object.entries(requests)) {
+    const participantIds = [a, b].sort(compareIds);
+    const key = JSON.stringify(participantIds);
+    const edge = edgesByKey.get(key) ?? { participantIds, weight: 0 };
+    edge.weight++;
+    edgesByKey.set(key, edge);
+  }
+  const edges = [...edgesByKey.values()].sort((a, b) => compareIds(JSON.stringify(a.participantIds), JSON.stringify(b.participantIds)));
+  const capacity = availablePods(seats).length;
+  let maximum = 0;
+  let sets = [[]];
+  const selected = [];
+  const used = new Set();
+  function visit(start, weight) {
+    if (weight > maximum) { maximum = weight; sets = [selected.slice()]; }
+    else if (weight === maximum && selected.length) sets.push(selected.slice());
+    if (selected.length === capacity) return;
+    for (let index = start; index < edges.length; index++) {
+      const edge = edges[index];
+      if (edge.participantIds.some(id => used.has(id))) continue;
+      edge.participantIds.forEach(id => used.add(id));
+      selected.push(edge);
+      visit(index + 1, weight + edge.weight);
+      selected.pop();
+      edge.participantIds.forEach(id => used.delete(id));
+    }
+  }
+  visit(0, 0);
+  return { requests, maximum, sets };
+}
+
+export function getMaxCompanionSatisfied(participants, seats, companions = {}) {
+  return maximumCompanionSets(participants, seats, companions).maximum;
+}
+
+export function buildMatchingPreferences(participants, seats, preferences, companions = {}, companionPlan = []) {
+  const validation = validatePreferences(participants, seats, preferences);
+  if (!validation.valid) throw new Error(validation.errors.join('\n'));
+  const requests = normalizeCompanions(participants, companions);
+  const pods = availablePods(seats);
+  const known = new Set(participants.map(person => person.id));
+  const usedPeople = new Set();
+  const usedSeats = new Set();
+  if (!Array.isArray(companionPlan) || companionPlan.length > pods.length) throw new Error('C 구역 동료 배정 계획이 올바르지 않습니다.');
+  const designated = new Map();
+  for (const entry of companionPlan) {
+    const people = entry?.participantIds;
+    const places = entry?.seatIds;
+    if (!Array.isArray(people) || people.length !== 2 || !Array.isArray(places) || places.length !== 2 ||
+      people[0] === people[1] || places[0] === places[1] ||
+      people.some(id => !known.has(id) || usedPeople.has(id)) || places.some(id => usedSeats.has(id)) ||
+      !pods.some(pair => places.every(id => pair.includes(id))) ||
+      (requests[people[0]] !== people[1] && requests[people[1]] !== people[0])) {
+      throw new Error('C 구역 동료 배정 계획에 잘못된 짝, 좌석 또는 중복이 있습니다.');
+    }
+    people.forEach((id, index) => { usedPeople.add(id); usedSeats.add(places[index]); designated.set(id, places[index]); });
+  }
+  return Object.fromEntries(participants.map(person => {
+    const first = designated.get(person.id);
+    const original = preferences[person.id];
+    return [person.id, first ? [first, ...original.filter(id => id !== first)] : [...original]];
+  }));
+}
+
+function* companionPlans(sets, pods) {
+  for (const edges of sets) {
+    const plan = [];
+    const usedPods = new Set();
+    function* assign(index) {
+      if (index === edges.length) { yield plan.map(entry => ({ participantIds: [...entry.participantIds], seatIds: [...entry.seatIds] })); return; }
+      for (let pod = 0; pod < pods.length; pod++) {
+        if (usedPods.has(pod)) continue;
+        usedPods.add(pod);
+        for (const seatIds of [pods[pod], [...pods[pod]].reverse()]) {
+          plan.push({ participantIds: edges[index].participantIds, seatIds });
+          yield* assign(index + 1);
+          plan.pop();
+        }
+        usedPods.delete(pod);
+      }
+    }
+    yield* assign(0);
+  }
+}
+
+/**
+ * Companion fulfillment is maximized exactly before distance and submitted rank.
+ * Every maximum companion plan is screened; only the best 12 are expanded over
+ * all part anchors. Distance is best among searched candidates, not globally optimal.
+ * Stability uses fixed composite applicant lists and the returned seat priorities.
+ */
+export function allocateSeats({ participants, seats, preferences, companions = {}, seed = DEFAULT_SEED, mode = 'distance', onProgress } = {}) {
   const context = prepare(participants, seats, preferences);
+  const { requests, sets } = maximumCompanionSets(participants, seats, companions);
   if (!['distance', 'preference'].includes(mode)) throw new Error('배정 모드는 distance 또는 preference여야 합니다.');
   if (typeof seed !== 'string' && (typeof seed !== 'number' || !Number.isFinite(seed))) throw new Error('추첨 시드는 문자열 또는 유한한 숫자여야 합니다.');
   if (onProgress !== undefined && typeof onProgress !== 'function') throw new Error('진행 콜백은 함수여야 합니다.');
@@ -204,52 +308,99 @@ export function allocateSeats({ participants, seats, preferences, seed = DEFAULT
       if (context.parts[a] === context.parts[b]) samePartPairs.push([a, b]);
     }
   }
+  const personIndex = new Map(context.people.map((person, index) => [person.id, index]));
+  const seatIndex = new Map(context.places.map((seat, index) => [seat.id, index]));
+  const originalRanks = context.lists.map(list => {
+    const ranks = new Int32Array(size);
+    list.forEach((seat, index) => { ranks[seat] = index + 1; });
+    return ranks;
+  });
   function evaluate(result) {
     let totalDistance = 0;
     for (const [a, b] of samePartPairs) totalDistance += distances[result.assigned[a]][result.assigned[b]];
-    return { totalDistance, rankSum: result.next.reduce((sum, rank) => sum + rank, 0) };
+    let rankSum = 0;
+    result.assigned.forEach((seat, person) => { rankSum += originalRanks[person][seat]; });
+    return { totalDistance, rankSum };
   }
-  const baselinePrefers = (seat, person, current) => tieRanks[seat][person] < tieRanks[seat][current];
-  let best = solve(context.lists, size, baselinePrefers);
-  let bestScore = evaluate(best);
+  function compareScores(a, b) {
+    return (mode === 'distance' ? a.totalDistance - b.totalDistance : 0) || a.rankSum - b.rankSum;
+  }
+  function configuration(plan) {
+    const designated = new Int32Array(size).fill(-1);
+    const lists = context.lists.slice();
+    for (const entry of plan) {
+      entry.participantIds.forEach((id, index) => {
+        const person = personIndex.get(id);
+        const seat = seatIndex.get(entry.seatIds[index]);
+        designated[seat] = person;
+        lists[person] = [seat, ...context.lists[person].filter(value => value !== seat)];
+      });
+    }
+    return { lists, designated };
+  }
+  function comparer(designated, anchors = null) {
+    return (seat, person, current) => {
+      if (designated[seat] !== -1) {
+        if (person === designated[seat]) return true;
+        if (current === designated[seat]) return false;
+      }
+      if (anchors) {
+        const difference = distances[seat][anchors[context.parts[person]]] - distances[seat][anchors[context.parts[current]]];
+        if (difference !== 0) return difference < 0;
+      }
+      return tieRanks[seat][person] < tieRanks[seat][current];
+    };
+  }
+  const pods = availablePods(context.places);
+  const plans = [...companionPlans(sets, pods)];
+  const expansionCount = Math.min(12, plans.length);
+  const anchorsPerPlan = mode === 'distance' ? Math.max(0, size * (size - 1) * (size - 2)) : 0;
+  const totalCandidates = plans.length + expansionCount * anchorsPerPlan;
+  let candidateCount = 0;
+  let best = null;
+  let bestScore = null;
+  let bestPlan = [];
   let bestAnchors = null;
-  let candidateCount = 1;
-  const totalCandidates = mode === 'distance' ? 1 + size * (size - 1) * (size - 2) : 1;
+  let bestConfiguration;
+  const screened = [];
+  function consider(result, score, plan, config, anchors = null) {
+    if (!best || compareScores(score, bestScore) < 0) {
+      best = result; bestScore = score; bestPlan = plan; bestConfiguration = config; bestAnchors = anchors;
+    }
+    candidateCount++;
+    if (candidateCount % 256 === 0) onProgress?.({ completed: candidateCount, total: totalCandidates });
+  }
+  for (const plan of plans) {
+    const config = configuration(plan);
+    const result = solve(config.lists, size, comparer(config.designated));
+    const score = evaluate(result);
+    consider(result, score, plan, config);
+    screened.push({ plan, config, score });
+    screened.sort((a, b) => compareScores(a.score, b.score));
+    if (screened.length > 12) screened.pop();
+  }
   if (mode === 'distance') {
-    // Comparison is lazy: no sorting of all 21 receiver lists per candidate.
-    for (let data = 0; data < size; data++) {
-      for (let dispatch = 0; dispatch < size; dispatch++) {
-        if (dispatch === data) continue;
-        for (let map = 0; map < size; map++) {
-          if (map === data || map === dispatch) continue;
-          const anchors = [data, dispatch, map];
-          const prefers = (seat, person, current) => {
-            const difference = distances[seat][anchors[context.parts[person]]] - distances[seat][anchors[context.parts[current]]];
-            return difference < 0 || (difference === 0 && tieRanks[seat][person] < tieRanks[seat][current]);
-          };
-          const candidate = solve(context.lists, size, prefers);
-          const score = evaluate(candidate);
-          if (score.totalDistance < bestScore.totalDistance || (score.totalDistance === bestScore.totalDistance && score.rankSum < bestScore.rankSum)) {
-            best = candidate;
-            bestScore = score;
-            bestAnchors = anchors;
+    for (const { plan, config } of screened) {
+      for (let data = 0; data < size; data++) {
+        for (let dispatch = 0; dispatch < size; dispatch++) {
+          if (dispatch === data) continue;
+          for (let map = 0; map < size; map++) {
+            if (map === data || map === dispatch) continue;
+            const anchors = [data, dispatch, map];
+            const candidate = solve(config.lists, size, comparer(config.designated, anchors));
+            consider(candidate, evaluate(candidate), plan, config, anchors);
           }
-          candidateCount++;
-          if (candidateCount % 256 === 0) onProgress?.({ completed: candidateCount, total: totalCandidates });
         }
       }
     }
   }
   onProgress?.({ completed: candidateCount, total: totalCandidates });
-  const winningPrefers = bestAnchors ? (seat, person, current) => {
-    const difference = distances[seat][bestAnchors[context.parts[person]]] - distances[seat][bestAnchors[context.parts[current]]];
-    return difference < 0 || (difference === 0 && tieRanks[seat][person] < tieRanks[seat][current]);
-  } : baselinePrefers;
   const assignments = assignmentsFor(context, best);
   return {
     assignments,
     seed,
     mode,
+    companionPlan: bestPlan,
     metrics: {
       totalDistance: bestScore.totalDistance,
       averageDistance: samePartPairs.length ? bestScore.totalDistance / samePartPairs.length : 0,
@@ -258,8 +409,9 @@ export function allocateSeats({ participants, seats, preferences, seed = DEFAULT
       matchedCount: assignments.length,
       vacancies: size - assignments.length,
       candidateCount,
+      ...getCompanionMetrics(participants, seats, requests, assignments),
     },
-    seatPriorities: prioritiesFor(context, winningPrefers),
+    seatPriorities: prioritiesFor(context, comparer(bestConfiguration.designated, bestAnchors)),
     anchors: bestAnchors ? Object.fromEntries(PARTS.map((part, index) => [part, context.places[bestAnchors[index]].id])) : null,
   };
 }

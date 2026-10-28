@@ -797,6 +797,7 @@
     ],
     "seed": "jari-random-2026-10-28",
     "mode": "distance",
+    "companionPlan": [],
     "metrics": {
       "totalDistance": 145.17838547624478,
       "averageDistance": 2.341586862520077,
@@ -804,7 +805,9 @@
       "top3Count": 14,
       "matchedCount": 20,
       "vacancies": 1,
-      "candidateCount": 7981
+      "candidateCount": 7981,
+      "companionRequested": 0,
+      "companionSatisfied": 0
     },
     "seatPriorities": {
       "68": [
@@ -1283,6 +1286,8 @@
     "top3Count": 16,
     "matchedCount": 20,
     "vacancies": 1,
-    "candidateCount": 1
+    "candidateCount": 1,
+    "companionRequested": 0,
+    "companionSatisfied": 0
   }
 }
